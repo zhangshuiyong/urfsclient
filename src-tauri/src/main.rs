@@ -12,11 +12,26 @@ mod inspect;
 mod upload;
 
 use std::path::Path;
-use crate::upload::{DatasetUploader, DatasetMeta};
 
-// Learn more about Tauri commands at https://tauri.app/v1/guides/features/command
+use tokio::{self, runtime::Runtime};
+use tokio::sync::mpsc;
+
+use crate::upload::{DatasetManager,DataSetStatus,DatasetUploader, DatasetMeta};
+
+use anyhow::{ensure, Result, Context};
+use std::fs::{self, metadata, DirEntry, File, OpenOptions};
+use std::sync::Arc;
+use nydus_api::ConfigV2;
+
 #[tauri::command]
-async fn greet(name: String) -> Result<String,String> {
+async fn upload(dataset_status_sender_car: tauri::State<'_,DatasetManagerCar>,name: String) -> Result<String,String> {
+    
+    let dataset_status_sender = dataset_status_sender_car.inner().dataset_status_sender.clone();
+
+    if dataset_status_sender.send(("x".to_string(),DataSetStatus::Init)).await.is_err() {
+        error!("[upload dataset_status_sender]: dataset_status chan closed!!!");
+        return Err(format!("upload dataset_status_sender Err, {}", name));
+    }
 
     let dataset_image_path = Path::new("/Users/terrill/Documents/urchin/zhangshuiyong/urfs/tests/cifar-10-image");
 
@@ -44,17 +59,14 @@ async fn greet(name: String) -> Result<String,String> {
     }
 
     let dataset_metas: Vec<DatasetMeta> = result.unwrap();
-
     let dataset_meta = &dataset_metas[0];
-
-    let upload_url = "http://192.168.23.209:65004".to_string();
-
     let upload_dataset_meta = dataset_meta.clone();
-    let server_endpoint = upload_url.to_string();
+
+    let upload_server_endpoint = "http://192.168.23.209:65004".to_string();
 
     let mut uploader = DatasetUploader::new();
 
-    let result = uploader.upload(dataset_meta_path, upload_dataset_meta, dataset_blob_path, server_endpoint).await;
+    let result = uploader.upload(dataset_meta_path, upload_dataset_meta, dataset_blob_path, upload_server_endpoint).await;
     if result.is_err() {
         println!("[main]: uploader upload Err, {:?}", result);
         return Err(format!("uploader Err, {}", name));
@@ -66,11 +78,17 @@ async fn greet(name: String) -> Result<String,String> {
     }
 }
 
-use anyhow::{ensure, Result, Context};
-use std::fs::{self, metadata, DirEntry, File, OpenOptions};
-use std::result;
-use std::sync::Arc;
-use nydus_api::ConfigV2;
+#[tauri::command]
+async fn get_history(dataset_status_sender_car: tauri::State<'_,DatasetManagerCar>,dataset_id:String) -> Result<String,String> {
+
+    let dataset_manager = dataset_status_sender_car.inner().dataset_manager_lock.read().await;
+
+    let history = dataset_manager.get_history();
+
+    println!("get dataset_status history: {:?}", history);
+
+    Ok("Ok!".to_string())
+}
 
 fn ensure_directory<P: AsRef<Path>>(path: P) -> Result<()> {
     let dir = metadata(path.as_ref())
@@ -82,7 +100,6 @@ fn ensure_directory<P: AsRef<Path>>(path: P) -> Result<()> {
         );
     Ok(())
 }
-
 
 fn inspect_blob_info(bootstrap_path: &Path) -> Result<String> {
     let mut config = Arc::new(ConfigV2::default());
@@ -109,9 +126,40 @@ fn inspect_blob_info(bootstrap_path: &Path) -> Result<String> {
     Ok(jsons)
 }
 
+use tokio::sync::RwLock;
+#[derive(Clone)]
+struct DatasetManagerCar {
+    dataset_manager_lock: Arc<RwLock<DatasetManager>>,
+    dataset_status_sender: mpsc::Sender<(String,DataSetStatus)>
+}
+
 fn main() {
+    let rt = Runtime::new().unwrap();
+    let _guard = rt.enter();
+
+    let dataset_manager_lock = Arc::new(RwLock::new(DatasetManager::new()));
+    let dataset_manager_wlock = dataset_manager_lock.clone();
+    let (dataset_status_sender,mut dataset_status_collector) = mpsc::channel(100);
+    
+   let dmc = DatasetManagerCar {
+        dataset_manager_lock: dataset_manager_lock,
+        dataset_status_sender: dataset_status_sender.clone()
+    };
+    
+    tokio::spawn(async move {
+        let mut upload_manager = dataset_manager_wlock.write().await;
+        
+        while let Some(dataset_status) = dataset_status_collector.recv().await {
+            println!("[upload_manager]: received dataset_status: {:?}", dataset_status);
+
+            upload_manager.add_dataset_status("x".to_string(), dataset_status.1);
+        }
+    });
+
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![greet])
+        .manage(dmc)
+        .invoke_handler(tauri::generate_handler![upload])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
 }
