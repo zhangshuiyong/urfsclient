@@ -22,7 +22,8 @@ pub const CHUNK_UPLOADER_MAX_CONCURRENCY: usize = 4;
 use std::fmt;
 use nydus_utils::digest;
 
-enum DataSetStatus{
+#[derive(Debug,Clone)]
+pub enum DataSetStatus{
     Init,
     Uploading,
     AsyncProcessing,
@@ -248,6 +249,7 @@ struct StatFileResponse {
     digest: String,
 }
 
+#[derive(Debug)]
 //ToDo: DatasetManager work for dataset upload filter and collector and CC controller, do not need to upload a uploading dataset
 pub struct DatasetManager {
     upload_dataset_history: HashMap<String,DataSetStatus>,
@@ -260,6 +262,14 @@ impl DatasetManager {
             upload_dataset_history: HashMap::new(),
             all_dataset_chunk_sema: Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY)),
         }
+    }
+
+    pub fn add_dataset_status(&mut self,dataset_id:String,status:DataSetStatus) {
+        self.upload_dataset_history.insert(dataset_id,status);
+    }
+
+    pub fn get_history(&self) -> HashMap<String,DataSetStatus> {
+        self.upload_dataset_history.clone()
     }
 }
 

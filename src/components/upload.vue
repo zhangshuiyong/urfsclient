@@ -33,15 +33,19 @@ async function upload() {
     message: '开始上传',
     type: 'success',
   })
- await invoke("greet", { name:name.value }).then(
-    ()=>{ ElMessage({
+
+ try{
+  await invoke("upload", { name:name.value })
+  ElMessage({
     message: '文件上传成功',
     type: 'success'}
   )
-  }).catch((err) => ElMessage({
+ }catch(err: any){
+  ElMessage({
     message: err,
-    type: 'error'}
-  ))
+    type: 'error',
+  })
+ }
   
 }}
 </script>
