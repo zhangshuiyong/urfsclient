@@ -9,7 +9,13 @@
     </el-upload>
     <el-row class="row-bg" justify="center">   
       <el-col :span="4"><el-button type="primary" @click="upload()">点击上传</el-button></el-col>
+      
     </el-row>
+    <el-row class="row-bg" justify="center">   
+      <el-col :span="4"><el-button type="primary" @click="get_history()">上传历史</el-button></el-col>
+
+    </el-row>
+    
   </div>
 </template>
 <script lang="ts" setup>
@@ -35,7 +41,7 @@ async function upload() {
   })
 
  try{
-  await invoke("upload", { name:name.value })
+  await invoke("upload", { req :JSON.stringify({dataset_id: 'xx',server_endpoint: 'xxx' })})
   ElMessage({
     message: '文件上传成功',
     type: 'success'}
@@ -48,6 +54,24 @@ async function upload() {
  }
   
 }}
+
+async function get_history() {
+  
+ try{
+  await invoke("get_history", { name:name.value })
+  ElMessage({
+    message: '获取文件上传历史成功',
+    type: 'success'}
+  )
+ }catch(err: any){
+  ElMessage({
+    message: err,
+    type: 'error',
+  })
+ }
+  
+}
+
 </script>
 <style scoped>
 .uploadWrapper {

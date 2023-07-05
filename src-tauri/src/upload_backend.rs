@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::fmt::{Debug};
 use std::path::PathBuf;
 use anyhow::{Ok, Result};
+use nix::sys::select;
 use std::io::SeekFrom;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt,AsyncSeekExt};
 
 use reqwest::{multipart, Client, ClientBuilder};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc,oneshot,Semaphore};
 use tokio::time::Duration;
 use std::sync::Arc;
 use std::convert::From;
@@ -103,6 +104,49 @@ fn get_http_client() -> Result<Client> {
     Ok(httpclient)
 }
 
+use anyhow::{ensure, Context};
+use std::fs::metadata;
+
+use std::path::Path;
+use nydus_api::ConfigV2;
+use crate::inspect;
+
+fn ensure_directory<P: AsRef<Path>>(path: P) -> Result<()> {
+    let dir = metadata(path.as_ref())
+        .context(format!("failed to access path {:?}", path.as_ref()))?;
+    ensure!(
+            dir.is_dir(),
+            "specified path must be a directory: {:?}",
+            path.as_ref()
+        );
+    Ok(())
+}
+
+fn inspect_blob_info(bootstrap_path: &Path) -> Result<String> {
+    let mut config = Arc::new(ConfigV2::default());
+
+    // For backward compatibility with v2.1
+    config.internal.set_blob_accessible(true);
+
+    if let Some(cache) = Arc::get_mut(&mut config).unwrap().cache.as_mut() {
+        cache.cache_validate = true;
+    }
+
+    let cmd = "blobs".to_string();
+    let request_mode = true;
+
+    let mut inspector = inspect::RafsInspector::new(bootstrap_path, request_mode, config)
+        .map_err(|e| {
+            error!("failed to create dataset image inspector, {:?}", e);
+            e
+        })?;
+
+    let o = inspect::Executor::execute(&mut inspector, cmd).unwrap();
+    let jsons = serde_json::to_string( &o)?;
+
+    Ok(jsons)
+}
+
 //UrchinStatusCode subset contains UrchinFileStatus
 #[derive(Debug,PartialEq,Clone)]
 enum UrchinFileStatus{
@@ -170,7 +214,6 @@ async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_versi
     }
 
 }
-
 
 async fn stat_chunk_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_version_id:&str,
                          digest: Digest,total_size:u64,
@@ -251,26 +294,99 @@ struct StatFileResponse {
 
 #[derive(Debug)]
 //ToDo: DatasetManager work for dataset upload filter and collector and CC controller, do not need to upload a uploading dataset
+//refer loop & TCP::Listener
 pub struct DatasetManager {
     upload_dataset_history: HashMap<String,DataSetStatus>,
     all_dataset_chunk_sema :Arc<Semaphore>,
+    dataset_status_sender: mpsc::Sender<(String,DataSetStatus)>,
+    dataset_status_collector: mpsc::Receiver<(String,DataSetStatus)>,
+    ex_cmd_collector: mpsc::Receiver<(String,String,oneshot::Sender<String>)>
 }
 
+//start upload dataset through DatasetManager
+//then DatasetManager collect dataset upload status
+//DatasetManager Layer is the External Interact Entry
 impl DatasetManager {
-    pub fn new() -> Self {
+    pub fn new(ex_cmd_collector: mpsc::Receiver<(String,String,oneshot::Sender<String>)>) -> Self {
+        let (dataset_status_sender,dataset_status_collector) = mpsc::channel(100);
+    
         Self {
             upload_dataset_history: HashMap::new(),
             all_dataset_chunk_sema: Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY)),
+            dataset_status_sender,
+            dataset_status_collector,
+            ex_cmd_collector,
         }
     }
 
-    pub fn add_dataset_status(&mut self,dataset_id:String,status:DataSetStatus) {
+    /// DatasetManager must be call the run func to start working
+    /// 
+    /// Run for loop in current thread
+    ///
+    /// If you want to run in diff thread, you should use tokio::spawn
+    pub async fn run(&mut self) {
+        loop{
+            tokio::select! {
+                Some(dataset_status) = self.dataset_status_collector.recv() => {
+                    println!("[upload_manager]: received dataset_status: {:?}", dataset_status);
+        
+                    self.add_dataset_status("x".to_string(), dataset_status.1);
+                },
+                Some((cmd,req_json,resp_sender)) =  self.ex_cmd_collector.recv() => {
+                    
+                    if cmd.as_str() == "upload"{
+                        println!("[DatasetManager]:upload cmd processor received request: {:?}", req_json);
+                    }
+                    
+                    if cmd.as_str() == "get_history"{
+                        if resp_sender.send("get_history Ok!".to_string()).is_err() {
+                            error!("[DatasetManager]: get_history cmd resp channel rx dropped");
+                        }
+                    }
+
+                    if cmd.as_str() == "stop"{
+                        break
+                    }
+                },
+            }
+        }
+    }
+
+    fn add_dataset_status(&mut self,dataset_id:String,status:DataSetStatus) {
         self.upload_dataset_history.insert(dataset_id,status);
     }
 
-    pub fn get_history(&self) -> HashMap<String,DataSetStatus> {
-        self.upload_dataset_history.clone()
+    fn get_history(&self) {
+        self.upload_dataset_history.clone();
     }
+
+    async fn start_dataset_uploader(&self) -> Result<()> {
+        let dataset_image_path = Path::new("/Users/terrill/Documents/urchin/zhangshuiyong/urfs/tests/cifar-10-image");
+
+        ensure_directory(dataset_image_path.clone())?;
+
+        let dataset_meta_path = dataset_image_path.join("meta");
+        let dataset_blob_path = dataset_image_path.join("blob");
+
+        println!("dataset_image_dir:{:?},dataset_meta_path: {:?}",dataset_image_path,dataset_meta_path);
+
+        let blobs_info_json =  inspect_blob_info(dataset_meta_path.as_path())?;
+
+        let dataset_metas: Vec<DatasetMeta> =  serde_json::from_str(blobs_info_json.as_str())?;
+
+        let dataset_meta = &dataset_metas[0];
+        let upload_dataset_meta = dataset_meta.clone();
+
+        let upload_server_endpoint = "http://0.0.0.0:65004".to_string();
+
+        let mut uploader = DatasetUploader::new();
+
+        uploader.upload(dataset_meta_path, upload_dataset_meta, dataset_blob_path, upload_server_endpoint).await?;
+
+        Ok(())
+        
+    }
+
 }
 
 //Support HTTP/HTTPS
