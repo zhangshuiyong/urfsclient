@@ -98,7 +98,9 @@ async function terminate_upload() {
 async function get_history() {
   
  try{
-  info("点击文件上传")
+
+  info("[ui] click get_history btn")
+
   await invoke("get_history", {req: JSON.stringify({ name:name.value })})
   ElMessage({
     message: '获取文件上传历史成功',
