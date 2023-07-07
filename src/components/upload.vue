@@ -31,6 +31,7 @@ window.addEventListener("drop", (e) => e.preventDefault(), false);
 window.addEventListener("dragover", (e) => e.preventDefault(), false);
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/tauri";
+import { info } from "tauri-plugin-log-api";
 import { ElMessage } from 'element-plus'
 let name = ref('');
 const showText=(file: { name: string; })=>{
@@ -97,6 +98,7 @@ async function terminate_upload() {
 async function get_history() {
   
  try{
+  info("点击文件上传")
   await invoke("get_history", {req: JSON.stringify({ name:name.value })})
   ElMessage({
     message: '获取文件上传历史成功',
