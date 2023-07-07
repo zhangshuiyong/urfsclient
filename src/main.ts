@@ -7,7 +7,6 @@ import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import VueCookies from 'vue-cookies'
 
 import { attachConsole } from "tauri-plugin-log-api";
-
 attachConsole();
 
 const app = createApp(App)
