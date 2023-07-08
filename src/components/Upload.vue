@@ -83,7 +83,7 @@ async function get_history() {
   </div>
 
   <a-list
-    class="demo-loadmore-list"
+    class="demo-upload-list"
     item-layout="horizontal"
     :data-source="uploadItemList"
   >
