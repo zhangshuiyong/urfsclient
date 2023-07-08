@@ -1,15 +1,14 @@
-import { createApp } from 'vue'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
-import App from './App.vue'
-import router from './router'
-import * as ElementPlusIconsVue from '@element-plus/icons-vue'
-import VueCookies from 'vue-cookies'
-const app = createApp(App)
-for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
-  app.component(key, component)
-}
-app.use(ElementPlus)
-app.use(router)
-app.mount('#app')
-app.config.globalProperties.$cookies = VueCookies
+import { createApp } from "vue";
+
+import Antd from 'ant-design-vue';
+import 'ant-design-vue/dist/reset.css';
+
+import App from "./App.vue";
+import "./styles.css";
+
+import { attachConsole } from "tauri-plugin-log-api";
+attachConsole();
+
+const app = createApp(App);
+
+app.use(Antd).mount("#app");
