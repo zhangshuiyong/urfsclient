@@ -7,8 +7,6 @@ import { message } from 'ant-design-vue';
 
 import { FileOutlined,FolderOutlined } from '@ant-design/icons-vue';
 
-const greetMsg = ref("");
-const name = ref("");
 const uploadItemList:any = reactive([]);
 
 async function select_upload_file() {
@@ -68,7 +66,7 @@ async function terminate_upload() {
 async function get_history() {
     try{
         info("[ui] click get_history btn")
-        await invoke("get_history", {req: JSON.stringify({ name:name.value })})
+        await invoke("get_history", {req: JSON.stringify({ req: "{}" })})
         message.success("获取文件上传历史成功");
     }catch(err: any){
         message.error("终止上传错误：", err);
