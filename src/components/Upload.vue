@@ -14,9 +14,8 @@ async function select_upload_file() {
         multiple: false,
     });
 
-    info("[ui] select upload file :"+selected_file);
-
     if(typeof selected_file === 'string'){
+        info("[ui] select upload file :"+selected_file);
         uploadItemList.push({name:selected_file, isDir:false});
     }
 }
@@ -28,17 +27,21 @@ async function select_upload_fold() {
         directory: true,
     });
 
-    info("[ui] select upload folder :"+selected_folder);
-
     if(typeof selected_folder === 'string'){
+        info("[ui] select upload folder :"+selected_folder);
         uploadItemList.push({name:selected_folder,isDir:true});
     }
 }
 
-
 async function star_upload() {
     try{
-        await invoke("start_upload", { req :JSON.stringify({dataset_id: 'xx',server_endpoint: 'xxx' })})
+        await invoke("start_upload", { req :JSON.stringify({
+            dataset_id: 'xxx',
+            dataset_version_id: 'default',
+            dataset_image_dir: '/Users/terrill/Documents/urchin/zhangshuiyong/urfs/tests/cifar-10-image',
+            server_endpoint: 'http://0.0.0.0:65004'
+        })})
+
         message.success('正在上传');
     }catch(err: any){
         message.error('上传错误：',err);

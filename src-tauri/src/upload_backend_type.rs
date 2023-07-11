@@ -34,8 +34,10 @@ pub struct UiResponse{
 
 #[derive(Serialize, Deserialize,Debug)]
 pub struct UiStartUploadDatasetRequest{
-    dataset_id: String,
-    server_endpoint: String,
+    pub dataset_id: String,
+    pub dataset_version_id: String,
+    pub dataset_image_dir: String,
+    pub server_endpoint: String,
 }
 
 #[derive(Serialize, Deserialize,Debug)]
