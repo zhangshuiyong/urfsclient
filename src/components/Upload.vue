@@ -50,7 +50,10 @@ async function star_upload() {
 
 async function stop_upload() {
     try{
-        await invoke("stop_upload", { req :JSON.stringify({dataset_id: 'xx' })})
+        await invoke("stop_upload", { req :JSON.stringify({
+            dataset_id: 'xxx',
+            dataset_version_id: 'default',
+        })})
         message.success("暂停上传成功");
     }catch(err: any){
         message.error("暂停上传错误：", err);
