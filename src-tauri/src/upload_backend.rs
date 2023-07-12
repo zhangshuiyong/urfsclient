@@ -30,7 +30,7 @@ use crate::upload_backend_type::UiStopUploadDatasetRequest;
 pub enum DataSetStatus{
     Init,
     Uploading(f32),
-    Stop(f32),
+    Stop,
     AsyncProcessing,
     Success,
     Failed,
@@ -588,13 +588,13 @@ impl DatasetUploader {
 
     pub async fn upload(&mut self) -> Result<()> {
 
-        debug!("upload dataset_meta_path: {:?}",self.dataset_meta_path);
-        debug!("upload dataset_meta info:{:?}",self.dataset_meta);
-        debug!("upload dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
+        info!("[DatasetUploader]:[upload_meta] dataset_meta_path: {:?}",self.dataset_meta_path);
+        info!("[DatasetUploader]:[upload_meta] dataset_meta info:{:?}",self.dataset_meta);
+        info!("[DatasetUploader]:[upload_meta] dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
 
         self.upload_meta(self.dataset_id.clone(),self.dataset_version_id.clone(),self.dataset_meta_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
-        debug!("upload dataset_blob_path: {:?}",self.dataset_blob_path);
+        info!("[DatasetUploader]:[upload_blob] dataset_blob_path: {:?}",self.dataset_blob_path);
 
         self.upload_blob(self.dataset_id.clone(),self.dataset_version_id.clone(), self.dataset_blob_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
@@ -850,12 +850,31 @@ impl DatasetUploader {
                         }
                     }
                 },
+
+                //Do not need to process shutdown_req err
+                //Case if shutdown_sx is dropped, also need to shutdown
                 _ = self.shutdown_rx.recv() => {
-                    warn!("[DatasetChunksManager]: received shutdown cmd, stop [upload_chunks_manager] !!! binding dataset_id:{:?}, dataset_version_id:{:?}",
+                    warn!("[DatasetChunksManager]: received shutdown cmd, stop [upload_chunks_manager] and send DataSetStatus::Stop to [DatasetManager] !!! binding dataset_id:{:?}, dataset_version_id:{:?}",
                     dataset_id, dataset_version_id);
-                    //Do not need to process shutdown_req err
-                    //Case if shutdown_sx is dropped, also need to shutdown
-                    break;
+
+                    let send_result = dataset_status_sender.send((dataset_id.clone(),dataset_version_id.clone(),DataSetStatus::Stop)).await;
+
+                    match send_result {
+                        std::result::Result::Ok(_) => {
+                            warn!("[DatasetChunksManager]: succeed to send DataSetStatus to [DatasetManager], dataset_id:{:?}, dataset_version_id:{:?}", 
+                            dataset_id,dataset_version_id);
+                            //DataSetStatus::Stop, break the loop, End upload this dataset process!!!
+                            break;
+                        },
+                        std::result::Result::Err(e) => {
+                            //Can not handle this err normally, just log this err and break to End this dataset upload process!
+                            //DatasetManager dataset_status_collector are dropped will touch this err!
+                            error!("[DatasetChunksManager]: failed to send DataSetStatus to [DatasetManager], maybe [dataset_status_collector] are dropped!!! err:{:?}, dataset_id:{:?}, dataset_version_id:{:?}",
+                            e,dataset_id,dataset_version_id);
+                            //break the loop, End this dataset upload process!!!
+                            break;
+                        }
+                    }
                 }
             }
         }
