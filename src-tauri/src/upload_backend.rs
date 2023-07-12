@@ -588,13 +588,13 @@ impl DatasetUploader {
 
     pub async fn upload(&mut self) -> Result<()> {
 
-        debug!("upload dataset_meta_path: {:?}",self.dataset_meta_path);
-        debug!("upload dataset_meta info:{:?}",self.dataset_meta);
-        debug!("upload dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
+        info!("[DatasetUploader]:[upload_meta] dataset_meta_path: {:?}",self.dataset_meta_path);
+        info!("[DatasetUploader]:[upload_meta] dataset_meta info:{:?}",self.dataset_meta);
+        info!("[DatasetUploader]:[upload_meta] dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
 
         self.upload_meta(self.dataset_id.clone(),self.dataset_version_id.clone(),self.dataset_meta_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
-        debug!("upload dataset_blob_path: {:?}",self.dataset_blob_path);
+        info!("[DatasetUploader]:[upload_blob] dataset_blob_path: {:?}",self.dataset_blob_path);
 
         self.upload_blob(self.dataset_id.clone(),self.dataset_version_id.clone(), self.dataset_blob_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
