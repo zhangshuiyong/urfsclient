@@ -53,7 +53,6 @@ async fn stop_upload(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,St
     Ok(resp_json)
 }
 
-
 #[tauri::command]
 async fn terminate_upload(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,String,oneshot::Sender<UiResponse>)>>,req: String) -> Result<String,String> {
     Ok("terminate upload Ok!".to_string())

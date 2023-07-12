@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::fmt::{Debug};
+use std::fmt::{Debug, format};
 use std::path::PathBuf;
 use anyhow::{Ok, Result};
 use std::io::SeekFrom;
@@ -30,6 +30,7 @@ use crate::upload_backend_type::UiStopUploadDatasetRequest;
 pub enum DataSetStatus{
     Init,
     Uploading(f32),
+    Stop(f32),
     AsyncProcessing,
     Success,
     Failed,
@@ -199,7 +200,7 @@ async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_versi
 
     let stat_url = reqwest::Url::parse_with_params(stat_endpoint.as_str(), &stat_params)?;
 
-    println!("[stat_file] url {:?}",stat_url);
+    debug!("[stat_file] url {:?}. dataset_id:{},dataset_version_id:{}",stat_url,dataset_id,dataset_version_id);
 
     let resp: StatFileResponse = httpclient
         .get(stat_url)
@@ -208,7 +209,7 @@ async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_versi
         .json()
         .await?;
 
-    println!("[stat_file] result:{:?}",resp);
+    debug!("[stat_file] result:{:?}. dataset_id:{},dataset_version_id:{}",resp,dataset_id,dataset_version_id);
 
     let status_code = resp.status_code.into();
 
@@ -245,7 +246,7 @@ async fn stat_chunk_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset
 
     let stat_url = reqwest::Url::parse_with_params(stat_endpoint.as_str(), &stat_params)?;
 
-    println!("[stat_chunk_file]: stat_chunk_file url {:?}",stat_url);
+    debug!("[stat_chunk_file]: stat_chunk_file url {:?}. dataset_id:{}, dataset_version_id:{}",stat_url,dataset_id,dataset_version_id);
 
     let resp: StatFileResponse = httpclient
         .get(stat_url)
@@ -254,7 +255,7 @@ async fn stat_chunk_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset
         .json()
         .await?;
 
-    println!("stat_chunk_file, result:{:?}!!!",resp);
+    debug!("[stat_chunk_file], result:{:?}. dataset_id:{}, dataset_version_id:{}",resp,dataset_id,dataset_version_id);
 
     let status_code = resp.status_code.into();
 
@@ -302,8 +303,8 @@ struct StatFileResponse {
 pub struct DatasetManager {
     upload_dataset_history: HashMap<String,DataSetStatus>,
     all_dataset_chunk_sema :Arc<Semaphore>,
-    dataset_status_sender: mpsc::Sender<(String,DataSetStatus)>,
-    dataset_status_collector: mpsc::Receiver<(String,DataSetStatus)>,
+    dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,
+    dataset_status_collector: mpsc::Receiver<(String,String,DataSetStatus)>,
     ui_cmd_collector: mpsc::Receiver<(String,String,oneshot::Sender<UiResponse>)>,
     dataset_uploader_shutdown_cmd_senders: HashMap<String,broadcast::Sender<()>>,
 }
@@ -333,77 +334,89 @@ impl DatasetManager {
     pub async fn run(&mut self) {
         loop{
             tokio::select! {
-                Some(dataset_status) = self.dataset_status_collector.recv() => {
-                    println!("[upload_manager]: received dataset_status: {:?}", dataset_status);
+                //allow dataset_status_sender free!
+                Some((dataset_id,dataset_version_id,dataset_status)) = self.dataset_status_collector.recv() => {
+                    debug!("[DatasetManager]: received dataset_status: {:?}. dataset_id:{},dataset_version_id:{}",
+                    dataset_status,dataset_id,dataset_version_id);
         
-                    self.add_dataset_status("x".to_string(), dataset_status.1);
+                    self.set_dataset_status(dataset_id,dataset_version_id, dataset_status);
                 },
+                //allow ui_cmd_sender free!
                 Some((cmd,req_json,resp_sender)) =  self.ui_cmd_collector.recv() => {
                     
                     match cmd.as_str() {
                         "start_upload" => {
-                            println!("[DatasetManager]:upload cmd processor received request: {:?}", req_json);
+                            debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
                             
                             let result = self.start_dataset_uploader(req_json).await;
-                            
+
                             match result {
                                 std::result::Result::Ok(_) => {
-                                   let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
-                                   if resp_sender.send(resp).is_err(){
-                                        //Do not need process next step, here is Err-Topest-Process Layer!
-                                        println!("[DatasetManager]: ui {} cmd resp channel err", cmd);
-                                        error!("[DatasetManager]: ui {} cmd resp channel err", cmd);
-                                   }
+
+                                    let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
+
+                                    if resp_sender.send(resp).is_err(){
+                                            //Do not need process next step, here is Err-Topest-Process Layer!
+                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                    }
                                 },
                                 std::result::Result::Err(e)=> {
-                                   let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
-                                   if resp_sender.send(resp).is_err(){
-                                        //Do not need process next step, here is Err-Topest-Process Layer!
-                                        println!("[DatasetManager]: ui {} cmd resp channel err", cmd);
-                                        error!("[DatasetManager]: ui {} cmd resp channel err", cmd);
-                                   }
+
+                                    let resp = UiResponse{status_code: -1, status_msg: e.to_string()};
+
+                                    if resp_sender.send(resp).is_err(){
+                                            //Do not need process next step, here is Err-Topest-Process Layer!
+                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                    }
                                 }
                             }
                         },
                         "stop_upload" => {
-                            println!("[DatasetManager]:upload cmd processor received request: {:?}", req_json);
+                            debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
+
                             let result =  self.stop_dataset_uploader(req_json).await;
 
                             match result {
                                 std::result::Result::Ok(_) => {
+
                                    let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
+
                                    if resp_sender.send(resp).is_err(){
                                         //Do not need process next step, here is Err-Topest-Process Layer!
-                                        println!("[DatasetManager]: ui {} cmd resp channel err", cmd);
-                                        error!("[DatasetManager]: ui {} cmd resp channel err", cmd);
+                                        error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                    }
                                 },
                                 std::result::Result::Err(e)=> {
-                                   let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
+
+                                   let resp = UiResponse{status_code: -1, status_msg: e.to_string()};
+
                                    if resp_sender.send(resp).is_err(){
                                         //Do not need process next step, here is Err-Topest-Process Layer!
-                                        println!("[DatasetManager]: ui {} cmd resp channel err: {}", cmd,e);
-                                        error!("[DatasetManager]: ui {} cmd resp channel err: {}", cmd,e);
+                                        error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                    }
                                 }
                             }
                         },
                         "get_history" => {
+                            debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
 
                             self.get_history();
 
                             let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
+
                             if resp_sender.send(resp).is_err() {
-                                println!("[DatasetManager]: ui {} cmd resp channel err", cmd);
-                                error!("[DatasetManager]: ui {} cmd resp channel err", cmd);
+                                //Do not need process next step, here is Err-Topest-Process Layer!
+                                error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                             }
                         },
                         _ => {
-                            error!("[DatasetManager]: unknown cmd: {}", cmd);
-                            let resp = UiResponse{status_code: -1, status_msg:"unknown cmd".to_string()};
+                            error!("[DatasetManager]: ui_cmd_collector received unknow cmd: {}, request: {:?}",cmd,req_json);
+
+                            let resp = UiResponse{status_code: -1, status_msg: format!("unknown cmd:{}",cmd)};
+
                             if resp_sender.send(resp).is_err() {
-                                println!("[DatasetManager]: ui {} cmd resp channel err", cmd);
-                                error!("[DatasetManager]: ui {} cmd resp channel err", cmd);
+                                //Do not need process next step, here is Err-Topest-Process Layer!
+                                error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                             }
                         }
                     }
@@ -412,56 +425,85 @@ impl DatasetManager {
         }
     }
 
-    fn add_dataset_status(&mut self,dataset_id:String,status:DataSetStatus) {
-        self.upload_dataset_history.insert(dataset_id,status);
+    fn set_dataset_status(&mut self,dataset_id:String,dataset_version_id:String,status:DataSetStatus) {
+        self.upload_dataset_history.insert(format!("{}:{}",dataset_id,dataset_version_id),status);
+    }
+
+    fn get_dataset_uploader_shutdown_cmd_sender(&self, dataset_id:String,dataset_version_id:String) -> Option<broadcast::Sender<()>> {
+        let op_dataset_uploader_shutdown_cmd_sender = self.dataset_uploader_shutdown_cmd_senders.get(format!("{}:{}",dataset_id,dataset_version_id).as_str());
+        match op_dataset_uploader_shutdown_cmd_sender {
+            Some(sender) => {
+                return Some(sender.clone());
+            },
+            None => {
+                return None;
+            }
+        }
+    }
+
+    fn set_dataset_uploader_shutdown_cmd_sender(&mut self, dataset_id:String,dataset_version_id:String,shutdown_cmd_sender:broadcast::Sender<()>) {
+        self.dataset_uploader_shutdown_cmd_senders.insert(format!("{}:{}",dataset_id,dataset_version_id),shutdown_cmd_sender);
     }
 
     fn get_history(&self) {
-       println!("get_history:{:?}",self.upload_dataset_history); 
+       debug!("get_history:{:?}",self.upload_dataset_history); 
     }
 
     async fn start_dataset_uploader(&mut self, req_json:String) -> Result<()> {
-
+       
         let req =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json)?;
-
-        let dataset_image_path = Path::new("/Users/terrill/Documents/urchin/zhangshuiyong/urfs/tests/cifar-10-image");
+                            
+        let dataset_image_path = Path::new(req.dataset_image_dir.as_str());
 
         ensure_directory(dataset_image_path.clone())?;
 
         let dataset_meta_path = dataset_image_path.join("meta");
-        let dataset_blob_path = dataset_image_path.join("blob");
 
-        println!("dataset_image_dir:{:?},dataset_meta_path: {:?}",dataset_image_path,dataset_meta_path);
+        debug!("dataset_image_dir:{:?},dataset_meta_path: {:?}",dataset_image_path,dataset_meta_path);
 
         let blobs_info_json =  inspect_blob_info(dataset_meta_path.as_path())?;
 
         let dataset_metas: Vec<DatasetMeta> =  serde_json::from_str(blobs_info_json.as_str())?;
 
         let dataset_meta = &dataset_metas[0];
+
         let upload_dataset_meta = dataset_meta.clone();
 
-        let upload_server_endpoint = "http://0.0.0.0:65004".to_string();
+        let dataset_blob_path = dataset_image_path.join(upload_dataset_meta.digest.as_str());
+
+        let upload_server_endpoint = req.server_endpoint.clone();
 
         let (uploader_shutdown_cmd_sx,uploader_shutdown_cmd_rx) = broadcast::channel(1);
         
         let uploader_shutdown_cmd_suber = uploader_shutdown_cmd_sx.clone();
 
-        self.dataset_uploader_shutdown_cmd_senders.insert("xx".to_string(),uploader_shutdown_cmd_sx);
-
         let dataset_status_sender = self.dataset_status_sender.clone();
+
+        let dataset_id = req.dataset_id.clone();
+        let dataset_version_id = req.dataset_version_id.clone();
 
         //Concurent upload futures tree
         tokio::spawn(async move {
             
-            let mut uploader = DatasetUploader::new(dataset_status_sender,
-                                                                    uploader_shutdown_cmd_suber,
-                                                                    uploader_shutdown_cmd_rx);
+            let mut uploader = DatasetUploader::new(dataset_id,
+                                                                     dataset_version_id,
+                                                                     dataset_meta_path,
+                                                                     upload_dataset_meta,
+                                                                     dataset_blob_path,
+                                                                     upload_server_endpoint,
+                                                                     dataset_status_sender,
+                                                      uploader_shutdown_cmd_suber,
+                                                         uploader_shutdown_cmd_rx);
 
             //ToDo: process upload result Error!!!
-            uploader.upload(dataset_meta_path, upload_dataset_meta, dataset_blob_path, upload_server_endpoint).await?;
+            uploader.upload().await?;
 
             Ok(())
         });
+
+        // after Concurent create DatasetUploader, should add meta to DatasetManager
+        self.set_dataset_uploader_shutdown_cmd_sender(req.dataset_id.clone(), req.dataset_version_id.clone(), uploader_shutdown_cmd_sx);
+        self.set_dataset_status(req.dataset_id.clone(),req.dataset_version_id.clone(), DataSetStatus::Init);
 
         Ok(())
 
@@ -471,22 +513,27 @@ impl DatasetManager {
 
         let req =  serde_json::from_str::<UiStopUploadDatasetRequest>(&req_json)?;
         
-        let try_uploader_shutdown_sx = self.dataset_uploader_shutdown_cmd_senders.get("xx");
+        let try_uploader_shutdown_sx = self.get_dataset_uploader_shutdown_cmd_sender(req.dataset_id.clone(), req.dataset_version_id.clone());
         
         match try_uploader_shutdown_sx {
             Some(shutdown_sx) => {
                 let uploader_shutdown_sx = shutdown_sx.clone();
 
-                println!("[stop_dataset_uploader]: send dataset shutdown cmd !!!");
+                debug!("[DatasetManager]: stop_dataset_uploader, send dataset shutdown cmd!!! dataset_id:{},dataset_version_id:{}",
+                req.dataset_id,req.dataset_version_id);
                 if uploader_shutdown_sx.send(()).is_err() {
                     //ToDo: process error log
-                    println!("[stop_dataset_uploader]: send dataset shutdown cmd err");
-                    return Err(anyhow!("[stop_dataset_uploader]: send dataset shutdown cmd err"));
+                    error!("[DatasetManager]: stop_dataset_uploader, uploader_shutdown_sx send shutdown cmd chan err!!! dataset_id:{},dataset_version_id:{}",
+                    req.dataset_id,req.dataset_version_id);
+                    return Err(anyhow!("[DatasetManager]: stop_dataset_uploader, uploader_shutdown_sx send shutdown cmd chan err!!! dataset_id:{},dataset_version_id:{}",
+                    req.dataset_id,req.dataset_version_id));
                 }
             },
             None => {
-                println!("[stop_dataset_uploader]: dataset_uploader_cmd_senders not found dataset_id: {:?}", req.dataset_id);
-                return Err(anyhow!("[stop_dataset_uploader]: dataset_uploader_cmd_senders not found dataset_id: {:?}", req.dataset_id));
+                error!("[DatasetManager]: stop_dataset_uploader, not found uploader_shutdown_sx. dataset_id:{},dataset_version_id:{}", 
+                req.dataset_id, req.dataset_version_id);
+                return Err(anyhow!("[DatasetManager]:stop_dataset_uploader, dataset_uploader_cmd_senders not found uploader_shutdown_sx. dataset_id:{},dataset_version_id:{}", 
+                req.dataset_id, req.dataset_version_id));
             }
         }
 
@@ -497,22 +544,36 @@ impl DatasetManager {
 
 //Support HTTP/HTTPS
 pub struct DatasetUploader {
+    dataset_id:String,
+    dataset_version_id:String,
+    dataset_meta_path: PathBuf,
+    dataset_meta:DatasetMeta,
+    dataset_blob_path:PathBuf,
+    upload_server_endpoint: String,
     all_dataset_chunk_sema :Arc<Semaphore>,
-    dataset_status_sender: mpsc::Sender<(String,DataSetStatus)>,
+    dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,
     shutdown_suber: broadcast::Sender<()>,
     shutdown_rx: broadcast::Receiver<()>,
 }
 
 impl Drop for DatasetUploader {
     fn drop(&mut self) {
-        println!("[DatasetUploader]: dataset uploader droped !!!");
+        debug!("[DatasetUploader]: dataset uploader droped !!! dataset_id:{},dataset_version_id:{}",self.dataset_id,self.dataset_version_id);
     }
 }
 
 impl DatasetUploader {
-    pub fn new(dataset_status_sender: mpsc::Sender<(String,DataSetStatus)>,shutdown_suber: broadcast::Sender<()>,shutdown_rx: broadcast::Receiver<()>) -> Self {
+    pub fn new(dataset_id:String,dataset_version_id:String,
+               dataset_meta_path: PathBuf,dataset_meta:DatasetMeta,dataset_blob_path:PathBuf,upload_server_endpoint: String,
+               dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,shutdown_suber: broadcast::Sender<()>,shutdown_rx: broadcast::Receiver<()>) -> Self {
 
         Self {
+            dataset_id,
+            dataset_version_id,
+            dataset_meta_path,
+            dataset_meta,
+            dataset_blob_path,
+            upload_server_endpoint,
             dataset_status_sender,
             all_dataset_chunk_sema: Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY)),
             shutdown_suber,
@@ -520,25 +581,19 @@ impl DatasetUploader {
         }
     }
 
-    pub async fn upload(&mut self, dataset_meta_path: PathBuf,dataset_meta:DatasetMeta,dataset_blob_path:PathBuf,server_endpoint: String) -> Result<()> {
+    pub async fn upload(&mut self) -> Result<()> {
 
-        println!("dataset_meta_path: {:?}",dataset_meta_path);
-        println!("dataset_blob_path: {:?}",dataset_blob_path);
+        debug!("upload dataset_meta_path: {:?}",self.dataset_meta_path);
+        debug!("upload dataset_meta info:{:?}",self.dataset_meta);
+        debug!("upload dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
 
-        println!("dataset_meta info:{:?}",dataset_meta);
-        println!("dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
+        self.upload_meta(self.dataset_id.clone(),self.dataset_version_id.clone(),
+                         self.dataset_meta_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
-        let dataset_status = DataSetStatus::Init;
+        debug!("upload dataset_blob_path: {:?}",self.dataset_blob_path);
 
-        println!("[upload] send dataset_status:{:?} to [DatasetManager]", dataset_status);
-
-        self.dataset_status_sender.send((dataset_meta.id.clone(),dataset_status)).await?;
-
-        //ToDo: diff Datasetid & Dataset digest
-
-        self.upload_meta("xxx".to_string(),"default".to_string(),dataset_meta_path,dataset_meta.clone(),server_endpoint.clone()).await?;
-
-        self.upload_blob("xxx".to_string(),"default".to_string(), dataset_blob_path,dataset_meta.clone(),server_endpoint.clone()).await?;
+        self.upload_blob(self.dataset_id.clone(),self.dataset_version_id.clone(), 
+        self.dataset_blob_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
         Ok(())
     }
@@ -547,9 +602,10 @@ impl DatasetUploader {
 
         let mut meta_file = File::open(dataset_meta_path.as_path()).await?;
         let local_meta_file_info = meta_file.metadata().await?;
-        println!("[upload_meta]: local meta file info {:?}", local_meta_file_info);
+        debug!("[DatasetUploader]:[upload_meta], local meta file info {:?}. dataset_id:{}, dataset_version_id:{}", 
+        local_meta_file_info,dataset_id,dataset_version_id);
 
-        let digest = Digest::new("urfs".to_string(),dataset_meta.id.clone());
+        let digest = Digest::new("urfs".to_string(),dataset_meta.digest.clone());
         let meta_file_size = local_meta_file_info.len();
         let data_mode = DataMode::Meta.to_string();
 
@@ -559,16 +615,18 @@ impl DatasetUploader {
 
         //ToDo: process UnKnown File Status!!!
         if meta_file_status == UrchinFileStatus::UnKnown {
-            println!("[stat_file] Meta file status is unknown, please check and stop upload process !!! ");
+            debug!("[DatasetUploader]:[upload_meta] stat_file Meta file status is unknown, please check and stop upload process !!! dataset_id:{}, dataset_version_id:{}",
+            dataset_id,dataset_version_id);
         }else if meta_file_status == UrchinFileStatus::Exist {
-            println!("[stat_file] Meta file exist in backend, upload Finish !!! ");
+            debug!("[DatasetUploader]:[upload_meta] stat_file Meta file exist in backend, upload Finish !!! dataset_id:{}, dataset_version_id:{}",
+            dataset_id,dataset_version_id);
 
             let dataset_status = DataSetStatus::Success;
 
-            println!("[upload] send dataset_status:{:?} to [DatasetManager]", dataset_status);
+            debug!("[DatasetUploader]:[upload_meta] send dataset_status:{:?} to [DatasetManager]. dataset_id:{}, dataset_version_id:{}", 
+            dataset_status,dataset_id,dataset_version_id);
 
-            //ToDo: process dif datasetid & dataset_meta.id!!!
-            self.dataset_status_sender.send((dataset_meta.id.clone(),dataset_status)).await?;
+            self.dataset_status_sender.send((dataset_id.clone(),dataset_version_id.clone(),dataset_status)).await?;
 
         }else {
 
@@ -586,8 +644,8 @@ impl DatasetUploader {
             let form = multipart::Form::new()
                 .part("file", file_part)
                 .text("mode", data_mode)
-                .text("dataset_id", dataset_id)
-                .text("dataset_version_id", dataset_version_id)
+                .text("dataset_id", dataset_id.clone())
+                .text("dataset_version_id", dataset_version_id.clone())
                 .text("digest", digest.to_string())
                 .text("total_size", meta_file_size.to_string());
 
@@ -595,7 +653,8 @@ impl DatasetUploader {
 
             let upload_meta_url = server_endpoint + "/api/v1/file/upload";
 
-            println!("[upload_meta]: upload meta url {:?}", upload_meta_url);
+            debug!("[DatasetUploader]:[upload_meta], upload meta url {:?}. dataset_id:{}, dataset_version_id:{}", 
+            upload_meta_url, dataset_id,dataset_version_id);
 
             let resp = httpclient
                 .put(upload_meta_url)
@@ -605,7 +664,8 @@ impl DatasetUploader {
             //ToDo: process meta file upload response!
             let result = resp.text().await?;
 
-            println!("upload dataset_meta finish, result:{}!!!", result);
+            debug!("[DatasetUploader]:[upload_meta] finish, result:{}!!! dataset_id:{}, dataset_version_id:{}", 
+            result, dataset_id,dataset_version_id);
         }
 
         Ok(())
@@ -613,7 +673,7 @@ impl DatasetUploader {
 
     async fn upload_blob(&mut self, dataset_id:String, dataset_version_id:String,dataset_blob_path: PathBuf,dataset_meta:DatasetMeta,server_endpoint: String) -> Result<()> {
 
-        let digest = Digest::new("urfs".to_string(),dataset_meta.id.clone());
+        let digest = Digest::new("urfs".to_string(),dataset_meta.digest.clone());
 
         let blob_file_status = stat_file(server_endpoint.as_str(),DataMode::Blob.to_string().as_str(),
                                          dataset_id.as_str(),dataset_version_id.as_str(),
@@ -621,12 +681,16 @@ impl DatasetUploader {
 
         //ToDo: process UnKnown File Status!!!
         if blob_file_status == UrchinFileStatus::UnKnown {
-            println!("[stat_file] Blob file status is unknown, please check and stop upload process !!! ");
+            debug!("[DatasetUploader]:[upload_blob] stat Blob file status is unknown, please check and stop upload process !!! dataset_id:{}, dataset_version_id:{}", 
+            dataset_id,dataset_version_id);
         }else if blob_file_status == UrchinFileStatus::Exist{
-            println!("[stat_file] Blob file exist in backend, upload Finish !!! ");
+            debug!("[DatasetUploader]:[upload_blob] stat Blob file exist in backend, upload Finish !!! dataset_id:{}, dataset_version_id:{}",
+            dataset_id,dataset_version_id);
         }else{
             //may be NotFoundFile or Partial
-            println!("[stat_file] not found blob file or partial upload, go to upload blob process");
+            debug!("[DatasetUploader]:[upload_blob] stat not found blob file or partial upload, go to upload blob process. dataset_id:{}, dataset_version_id:{}",
+            dataset_id,dataset_version_id);
+
             let all_dataset_chunk_sema = self.all_dataset_chunk_sema.clone();
             self.create_blob_chunks_manager(dataset_id,dataset_version_id,all_dataset_chunk_sema,dataset_meta,dataset_blob_path,server_endpoint).await?;
         }
@@ -639,77 +703,153 @@ impl DatasetUploader {
         let dataset_status_sender = self.dataset_status_sender.clone();
         let chunks_manager_shutdown_suber = self.shutdown_suber.clone();
 
-        let mut chunks_manager = DatasetChunksManager::new(dataset_id,
-                                                                                 dataset_version_id,
+        let (chunk_pusher, chunk_getter) = mpsc::channel(100);
+
+        let (chunk_result_sx,mut chunk_result_collector) = mpsc::channel(100);
+       
+        let mut chunks_manager = DatasetChunksManager::new(dataset_id.clone(),
+                                                                                 dataset_version_id.clone(),
                                                                                  chunks_dataset,
                                                                                  all_dataset_chunk_sema,
                                                                                  upload_endpoint,
                                                                                  dataset_file_path,
+                                                                                 chunk_pusher.clone(),
+                                                                                 chunk_result_sx.clone(),
                                                                                  chunks_manager_shutdown_suber);
 
-        let (chunk_pusher, chunk_getter) = mpsc::channel(100);
-        let (chunk_result_sx,mut chunk_result_collector) = mpsc::channel(100);
-       
-        chunks_manager.create_data_chunk_producer(chunk_pusher,chunk_result_sx).await;
+        //concurrent create data_chunk_consumer async task first! and wait data_chunk produce
+        //if DatasetManager send shutdown cmd, data_chunk_consumer can stop first and cause data_chunk_producer stop!
         chunks_manager.create_data_chunk_consumer(chunk_getter).await;
+        //concurrent create data_chunk_producer async task
+        chunks_manager.create_data_chunk_producer(chunk_pusher,chunk_result_sx).await;
 
         let mut rest_upload_size = chunks_manager.upload_dataset.compressed_size;
 
+        //wait data_chunk upload result or DatasetManager shutdown cmd
         loop{
             tokio::select! {
-                try_chunk_result = chunk_result_collector.recv() => {
-                    match try_chunk_result {
-                        Some(chunk_result) => {
-                            
-                            println!("[upload_chunks_manager]: received chunk_result: {:?}", chunk_result);
+                //chunk_result_collector will not get None, cause DatasetChunksManager retain a no use chunk_result_sender
+                //all chunk tasks end, will not let all chunk_result_senders are dropped, let chunk_result_collector get None
+                Some(chunk_result) = chunk_result_collector.recv() => {
+                    
+                    debug!("[DatasetChunksManager]: received chunk_result: {:?}, dataset_id:{:?}, dataset_version_id:{:?}", 
+                    chunk_result, dataset_id,dataset_version_id);
 
-                            if chunk_result.upload_status.is_ok(){
-                                rest_upload_size -= chunk_result.uploaded_size;
-                                //ToDo: Update Dataset Upload Status
-                                let uploaded_percent = 100.0 * (chunks_manager.upload_dataset.compressed_size - rest_upload_size) as f32 / chunks_manager.upload_dataset.compressed_size as f32;
-                                let uploaded_percent_2d = (uploaded_percent * 100.0).round() / 100.0;
-                                let dataset_status = DataSetStatus::Uploading(uploaded_percent_2d);
-                                
-                                println!("[upload_chunks_manager]: send DataSetStatus: {:?} to [DatasetManager]", dataset_status);
+                    if chunk_result.upload_status.is_err(){
+                        let dataset_status = DataSetStatus::Failed;
 
-                                dataset_status_sender.send((chunks_manager.dataset_id.clone(),dataset_status)).await?;
+                        warn!("[DatasetChunksManager]: send DataSetStatus: {:?} to [DatasetManager], dataset_id:{:?}, dataset_version_id:{:?}", 
+                        dataset_status,dataset_id,dataset_version_id);
+                        
+                        let send_result = dataset_status_sender.send((dataset_id.clone(),dataset_version_id.clone(),dataset_status)).await;
 
+                        match send_result {
+                            std::result::Result::Ok(_) => {
+                                warn!("[DatasetChunksManager]: succeed to send DataSetStatus to [DatasetManager], dataset_id:{:?}, dataset_version_id:{:?}", 
+                                dataset_id,dataset_version_id);
+                                //DataSetStatus::Failed, break the loop, End upload this dataset process!!!
+                                break;
+                            },
+                            std::result::Result::Err(e) => {
+                                //Can not handle this err normally, just log this err and break to End this dataset upload process!
+                                //DatasetManager dataset_status_collector are dropped will touch this err!
+                                error!("[DatasetChunksManager]: failed to send DataSetStatus to [DatasetManager], maybe [dataset_status_collector] are dropped!!! err:{:?}, dataset_id:{:?}, dataset_version_id:{:?}",
+                                e,dataset_id,dataset_version_id);
+                                //break the loop, End this dataset upload process!!!
+                                break;
                             }
+                        }
+                    }else{
+                        rest_upload_size -= chunk_result.uploaded_size;
+                        let uploaded_percent = 100.0 * (chunks_manager.upload_dataset.compressed_size - rest_upload_size) as f32 / chunks_manager.upload_dataset.compressed_size as f32;
+                        let uploaded_percent_2d = (uploaded_percent * 100.0).round() / 100.0;
+                        let dataset_status = DataSetStatus::Uploading(uploaded_percent_2d);
+                        
+                        debug!("[DatasetChunksManager]: send DataSetStatus: {:?} to [DatasetManager]. dataset_id:{:?}, dataset_version_id:{:?}", 
+                        dataset_status, dataset_id,dataset_version_id);
 
-                            //ToDo: process upload_status is err
+                        let send_result = dataset_status_sender.send((dataset_id.clone(),dataset_version_id.clone(),dataset_status)).await;
 
-                            if rest_upload_size == 0 {
-                                println!("[upload_chunks_manager]: upload dataset blob success !!!");
+                        match send_result {
+                            std::result::Result::Ok(_) => {
+                                debug!("[DatasetChunksManager]: succeed to send DataSetStatus to [DatasetManager], dataset_id:{:?}, dataset_version_id:{:?}", 
+                                dataset_id,dataset_version_id);
+                            },
+                            std::result::Result::Err(e) => {
+                                //Can not handle this err normally, just log this err and break to End this dataset upload process!
+                                //DatasetManager dataset_status_collector are dropped will touch this err!
+                                error!("[DatasetChunksManager]: failed to send DataSetStatus to [DatasetManager], maybe [dataset_status_collector] are dropped!!! err:{:?}, dataset_id:{:?}, dataset_version_id:{:?}",
+                                e,dataset_id,dataset_version_id);
+                                //break the loop, End this dataset upload process!!!
+                                break;
+                            }
+                        }
+                    }
 
-                                //ToDo: retry to merge chunks if failed!!!
-                                let merge_result = chunks_manager.merge_data_chunks().await;
+                    if rest_upload_size == 0 {
+                        info!("[DatasetChunksManager]: upload dataset blob success !!! dataset_id:{:?}, dataset_version_id:{:?}", 
+                        dataset_id, dataset_version_id);
 
-                                println!("[upload_chunks_manager]: dataset sent chunks merge cmd, result:{:?}!!!",merge_result);
+                        let merge_result = chunks_manager.merge_data_chunks().await;
+
+                        info!("[DatasetChunksManager]: sent merge chunks cmd to server, result:{:?}, dataset_id:{:?}, dataset_version_id:{:?}",
+                        merge_result, dataset_id, dataset_version_id);
+                        
+                        match merge_result {
+                            std::result::Result::Ok(_) => {
+                                let dataset_status = DataSetStatus::AsyncProcessing;
+                                info!("[DatasetChunksManager]: send DataSetStatus: {:?} to [DatasetManager], dataset_id:{:?}, dataset_version_id:{:?}", 
+                                dataset_status,dataset_id, dataset_version_id);
                                 
-                                match merge_result {
+                                let send_result = dataset_status_sender.send((dataset_id.clone(),dataset_version_id.clone(),dataset_status)).await;
+
+                                match send_result {
                                     std::result::Result::Ok(_) => {
-                                        let dataset_status = DataSetStatus::AsyncProcessing;
-                                        println!("[upload_chunks_manager]: send DataSetStatus: {:?} to [DatasetManager]", dataset_status);
-                                        dataset_status_sender.send((chunks_manager.dataset_id.clone(),dataset_status)).await?;
+                                        info!("[DatasetChunksManager]: succeed to send DataSetStatus to [DatasetManager], dataset_id:{:?}, dataset_version_id:{:?}", 
+                                        dataset_id, dataset_version_id);
                                     },
-                                    std::result::Result::Err(e)=> {
-                                        let dataset_status = DataSetStatus::Failed;
-                                        println!("[upload_chunks_manager]: send DataSetStatus: {:?} to [DatasetManager], Err:{}", dataset_status,e);
-                                        dataset_status_sender.send((chunks_manager.dataset_id.clone(),dataset_status)).await?;
+                                    std::result::Result::Err(e) => {
+                                        //Can not handle this err normally, just log this err and break to End this dataset upload process!
+                                        //DatasetManager dataset_status_collector are dropped will touch this err!
+                                        error!("[DatasetChunksManager]: failed to send DataSetStatus to [DatasetManager], maybe [dataset_status_collector] are dropped!!! err:{:?}, dataset_id:{:?}, dataset_version_id:{:?}",
+                                        e,dataset_id, dataset_version_id);
+                                        //break the loop, End this dataset upload process!!!
+                                        break;
                                     }
                                 }
+                            },
+                            std::result::Result::Err(e)=> {
 
+                                let dataset_status = DataSetStatus::Failed;
+
+                                warn!("[DatasetChunksManager]: send DataSetStatus: {:?} to [DatasetManager], Err:{},  dataset_id:{:?}, dataset_version_id:{:?}", 
+                                dataset_status,e, dataset_id, dataset_version_id);
+                                
+                                let send_result = dataset_status_sender.send((dataset_id.clone(),dataset_version_id.clone(),dataset_status)).await;
+
+                                match send_result {
+                                    std::result::Result::Ok(_) => {
+                                        warn!("[DatasetChunksManager]: succeed to send DataSetStatus to [DatasetManager], dataset_id:{:?}, dataset_version_id:{:?}",
+                                        dataset_id, dataset_version_id);
+                                        //DataSetStatus::Failed, break the loop, End this dataset upload process!!!
+                                        break;
+                                    },
+                                    std::result::Result::Err(e) => {
+                                        //Can not handle this err normally, just log this err and break to End this dataset upload process!
+                                        //DatasetManager dataset_status_collector are dropped will touch this err!
+                                        error!("[DatasetChunksManager]: failed to send DataSetStatus to [DatasetManager], maybe [dataset_status_collector] are dropped!!! err:{:?}, dataset_id:{:?}, dataset_version_id:{:?}",
+                                        e, dataset_id, dataset_version_id);
+                                        //break the loop, End this dataset upload process!!!
+                                        break;
+                                    }
+                                }
                             }
-                        },
-                        None => {
-                            println!("[upload_chunks_manager]: all chunk_result_sender in chunks task  are closed !!!");
-                            warn!("[upload_chunks_manager]: all chunk_result_sender in chunks task  are closed !!!");
-                            break;
                         }
                     }
                 },
                 _ = self.shutdown_rx.recv() => {
-                    println!("[upload_chunks_manager]: received shutdown cmd, stop upload dataset blob !!!");
+                    warn!("[DatasetChunksManager]: received shutdown cmd, stop [upload_chunks_manager] !!! binding dataset_id:{:?}, dataset_version_id:{:?}",
+                    dataset_id, dataset_version_id);
                     //Do not need to process shutdown_req err
                     //Case if shutdown_sx is dropped, also need to shutdown
                     break;
@@ -717,7 +857,7 @@ impl DatasetUploader {
             }
         }
 
-        println!("[upload_chunks_manager]: End !!!");
+        warn!("[DatasetChunksManager]: End !!! binding dataset_id:{:?}, dataset_version_id:{:?}",dataset_id, dataset_version_id);
 
         Ok(())
     }
@@ -733,12 +873,16 @@ struct DatasetChunksManager{
     upload_endpoint: String,
     upload_file_path: PathBuf,
     upload_dataset: DatasetMeta,
+    //retain chunks_pusher, no all chunks_pusher are dropped to let receiver get None
+    chunks_pusher: mpsc::Sender<DatasetChunk>,
+    //retain chunk_result_sender, no all chunk_result_sender are dropped to let receiver get None
+    chunk_result_sender:mpsc::Sender<DatasetChunkResult>,
     shutdown_cmd_suber: broadcast::Sender<()>,
 }
 
 impl Drop for DatasetChunksManager {
     fn drop(&mut self) {
-        println!("[DatasetChunksManager]: dataset chunks manager droped !!!");
+        debug!("[DatasetChunksManager]: dataset chunks manager droped !!! dataset_id:{},dataset_version_id:{}",self.dataset_id,self.dataset_version_id);
     }
 }
 
@@ -749,10 +893,12 @@ impl DatasetChunksManager {
            all_dataset_sema:Arc<Semaphore>,
            endpoint:String,
            file_path:PathBuf,
+           chunks_pusher:mpsc::Sender<DatasetChunk>,
+           chunk_result_sender:mpsc::Sender<DatasetChunkResult>,
            shutdown_cmd_suber:broadcast::Sender<()>) -> Self {
 
         let one_dataset_sema = Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY+1));
-        //ToDo: process upload status
+        
         Self {
             dataset_id,
             dataset_version_id,
@@ -761,12 +907,13 @@ impl DatasetChunksManager {
             upload_endpoint: endpoint,
             upload_file_path: file_path,
             upload_dataset: dataset_meta,
+            chunks_pusher,
+            chunk_result_sender,
             shutdown_cmd_suber,
         }
     }
 
-    async fn create_data_chunk_producer(&self,chunk_pusher:mpsc::Sender<DatasetChunk>,
-                                              chunk_result_sender:mpsc::Sender<DatasetChunkResult>) {
+    async fn create_data_chunk_producer(&self,chunks_pusher:mpsc::Sender<DatasetChunk>,chunk_result_sender:mpsc::Sender<DatasetChunkResult>) {
 
         let dataset_id = self.dataset_id.clone();
         let dataset_version_id = self.dataset_version_id.clone();
@@ -783,8 +930,12 @@ impl DatasetChunksManager {
             let mut chunk_seek_start  = 0u64;
             let mut chunk_num  = 0u64;
 
+            //if while is end normally, chunks_pusher will dropped.
+            //but not all dataset chunks_pushers are dropped, DatasetChunksManager retain a chunks_pusher!
+            //dataset chunks_getter will not receive None datachunk!
             while chunk_seek_start <= dataset_compressed_size-1 {
 
+                //Not all dataset chunk_result_sender are dropped, DatasetChunksManager retain a chunk_result_sender!
                 let dc = DatasetChunk::new(dataset_id.clone(),
                                            dataset_version_id.clone(),
                                            upload_dataset.clone(),
@@ -796,74 +947,177 @@ impl DatasetChunksManager {
                   one_dataset_chunk_sema.clone(),
                                            chunk_result_sender.clone());
 
-                if chunk_pusher.send(dc).await.is_err() {
+                if chunks_pusher.send(dc).await.is_err() {
                     //chunk_producer will shutdown after chunk_consumer_and_task_creator shutdown!
-                    error!("[chunks_producer]: chunk_getter closed by chunk_consumer_and_task_creator shutdown !!!");
-                    return;
+                    //normally will not occur this err, only activately send shutdown cmd!
+                    warn!("[DatasetChunksManager]:[chunks_producer], failed to send datachunk to chan, maybe [chunks_getter] dropped by [chunk_consumer_and_task_creator] shutdown, stop [chunks_producer]!!! binding dataset_id:{:?},dataset_version_id:{:?}",
+                    dataset_id,dataset_version_id);
+                    //break to End this dataset upload process!
+                    //ToDo: process this err?
+                    break;
                 }
 
                 chunk_seek_start += dataset_chunk_size as u64;
                 chunk_num += 1;
             }
 
-            println!("[chunks_producer]: End !!!");
-
+            warn!("[DatasetChunksManager]:[chunks_producer] End !!! binding dataset_id:{:?},dataset_version_id:{:?}",dataset_id,dataset_version_id);
         });
 
     }
 
     async fn create_data_chunk_consumer(&mut self,mut chunks_chan_getter:mpsc::Receiver<DatasetChunk>) {
-        
-        let create_chunk_task_sema = self.one_dataset_chunk_sema.clone();
+
+        let dataset_id = self.dataset_id.clone();
+        let dataset_version_id = self.dataset_version_id.clone();
+        let create_chunk_task_sema_by_one_dataset = self.one_dataset_chunk_sema.clone();
         let mut shutdown_cmd_rx = self.shutdown_cmd_suber.subscribe();
 
         tokio::spawn(async move {
             
             loop{
                 tokio::select! {
+                    //chunks_chan_getter will not get None, cause will not all chunks_pushers are dropped before
+                    //DatasetChunksManager retain a no use chunks_pusher
+                    //DatasetChunksManager will not dropped before this process!
                     Some(dc) = chunks_chan_getter.recv() => {
+                        let try_create_chunk_task_permited_by_one_dataset = create_chunk_task_sema_by_one_dataset.acquire().await;
 
-                        let try_create_chunk_task_permit = create_chunk_task_sema.acquire().await;
+                        let chunk_result_sender = dc.upload_result_sender.clone();
+                        let dataset_id = dc.dataset_id.clone();
+                        let dataset_version_id = dc.dataset_version_id.clone();
+                        let chunk_num = dc.chunk_num.clone();
 
-                        match try_create_chunk_task_permit {
+                        //Do not create many upload_chunk task entity, and then let them acquire one_dataset sema!
+                        match try_create_chunk_task_permited_by_one_dataset {
                             std::result::Result::Ok(_) => {
-                                println!("[chunk_consumer_and_task_creator]: create chunk task permit by one_dataset!");
+
+                                debug!("[DatasetChunksManager]:[chunk_consumer_and_task_creator]: create chunk task permited by one_dataset! dataset_id:{:?},dataset_version_id:{:?},",
+                                dc.dataset_id,dc.dataset_version_id);
+
                                 tokio::spawn(async move {
-                                    //ToDo: process upload chunk err result!
-                                    Self::create_upload_chunk_task(dc).await?;
+
+                                    let upload_result_sender = dc.upload_result_sender.clone();
+                                    let dataset_id = dc.dataset_id.clone();
+                                    let dataset_version_id = dc.dataset_version_id.clone();
+                                    let chunk_num = dc.chunk_num.clone();
+
+                                    let result = Self::create_upload_chunk_task(dc).await;
+                                    
+                                    match result {
+                                        std::result::Result::Ok(upload_chunk_result) => {
+                                            debug!("[DatasetChunksManager]:[upload_chunk_task_return]: upload chunk success, chunk num:{:?}, dataset_id:{:?},dataset_version_id:{:?}",
+                                            chunk_num.to_string(),dataset_id,dataset_version_id);
+
+                                            let send_result = upload_result_sender.send(upload_chunk_result).await;
+                                            
+                                            match send_result {
+                                                std::result::Result::Ok(_) => {
+                                                    debug!("[DatasetChunksManager]:[upload_chunk_task_return]: success to send upload_chunk_result to [DtataChunksManager], chunk num:{:?}, dataset_id:{:?},dataset_version_id:{:?}",
+                                                    chunk_num.to_string(),dataset_id,dataset_version_id);
+                                                },
+                                                std::result::Result::Err(e) => {
+                                                    //Only-One-Reason to failed to send upload_chunk_result to [DtataChunksManager]
+                                                    //is DtataChunksManager shutdown by [DtataManager] cmd!!!
+                                                    //maybe this err is normally by [DtataManager] shutdown cmd
+                                                    //so just warn log this err for process!!!
+                                                    warn!("[DatasetChunksManager]:[upload_chunk_task_return]: failed to send upload_chunk_result to [DtataChunksManager], Only-One-Reason is [DtataChunksManager] shutdown by [DtataManager] cmd!!!  chunk num:{:?}, err:{:?}. dataset_id:{:?},dataset_version_id:{:?}",
+                                                    chunk_num.to_string(),e,dataset_id,dataset_version_id);
+                                                }
+                                            }
+                                        },
+                                        std::result::Result::Err(e)=> {
+
+                                            warn!("[DatasetChunksManager]:[upload_chunk_task_return]: Operate-System-Error,send to [DataChunksManager] to process! chunk num:{:?},err:{}, dataset_id:{:?},dataset_version_id:{:?}",
+                                            chunk_num.to_string(),e,dataset_id,dataset_version_id);
+
+                                            //Err(upload_chunk_result) will set uploaded_size = 0
+                                            let upload_chunk_result = DatasetChunkResult::new(
+                                                0,
+                                                Err(anyhow!("[DatasetChunksManager]:[upload_chunk_task_return]: Operate-System-Error,chunk num:{:?},err:{:?}. dataset_id:{:?},dataset_version_id:{:?}",
+                                                chunk_num.to_string(),e,dataset_id,dataset_version_id))
+                                            );
+
+                                            let send_result = upload_result_sender.send(upload_chunk_result).await;
+
+                                            match send_result {
+                                                std::result::Result::Ok(_) => {
+                                                    debug!("[DatasetChunksManager]:[upload_chunk_task_return]: success to send Err(upload_chunk_result) to [DtataChunksManager], chunk num:{:?}, dataset_id:{:?},dataset_version_id:{:?}",
+                                                    chunk_num.to_string(),dataset_id,dataset_version_id);
+                                                },
+                                                std::result::Result::Err(e) => {
+                                                    //Only-One-Reason to failed to send upload_chunk_result to [DtataChunksManager]
+                                                    //is DtataChunksManager shutdown by [DtataManager] cmd!!!
+                                                    //maybe this err is normally by [DtataManager] shutdown cmd
+                                                    //so just warn log this err for process!!!
+                                                    warn!("[DatasetChunksManager]:[upload_chunk_task_return]: failed to send upload_chunk_result to [DtataChunksManager],Only-One-Reason is [DtataChunksManager] shutdown by [DtataManager] cmd!!! chunk num:{:?},err:{:?}. dataset_id:{:?},dataset_version_id:{:?}",
+                                                    chunk_num.to_string(),e,dataset_id,dataset_version_id);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    //All upload_chunk_task Result(Ok,Err) had processed! 
                                     Ok(())
                                 });
                             },
                             std::result::Result::Err(e) => {
-                                error!("[chunk_consumer_and_task_creator]: create chunk task err, permit by one_dataset err: {:?}", e);
-                                break;
+                                warn!("[DatasetChunksManager]:[chunk_consumer_and_task_creator]: failed to permit create chunk task of one_dataset, stop this dataset upload process!!! chunk num:{:?},err:{:?}. dataset_id:{:?},dataset_version_id:{:?}", 
+                                chunk_num.to_string(),e,dataset_id,dataset_version_id);
+
+                                //consume one datachunk of one dataset, should handle this err, send Err(upload_chunk_result) to DtataChunksManager!
+                                //Err(upload_chunk_result) will set uploaded_size = 0
+                                let upload_chunk_result = DatasetChunkResult::new(
+                                    0,
+                                    Err(anyhow!("[DatasetChunksManager]:[chunk_consumer_and_task_creator]: failed to permit create chunk task of one_dataset,chunk num:{:?},err:{:?}. dataset_id:{:?},dataset_version_id:{:?}",
+                                    chunk_num.to_string(),e,dataset_id,dataset_version_id))
+                                );
+
+                                let send_result = chunk_result_sender.send(upload_chunk_result).await;
+
+                                match send_result {
+                                    std::result::Result::Ok(_) => {
+                                        debug!("[DatasetChunksManager]:[chunk_consumer_and_task_creator]: success to send Err(upload_chunk_result) to [DtataChunksManager], chunk num:{:?}. dataset_id:{:?},dataset_version_id:{:?}",
+                                        chunk_num.to_string(),dataset_id,dataset_version_id);
+                                    },
+                                    std::result::Result::Err(e) => {
+                                        //Only-One-Reason to failed to send upload_chunk_result to [DtataChunksManager]
+                                        //is DtataChunksManager shutdown by [DtataManager] cmd!!!
+                                        //maybe this err is normally by [DtataManager] shutdown cmd
+                                        //so just warn log this err for process!!!
+                                        warn!("[DatasetChunksManager]:[chunk_consumer_and_task_creator]: failed to send upload_chunk_result to [DtataChunksManager],Only-One-Reason is [DtataChunksManager] shutdown by [DtataManager] cmd!!! chunk num:{:?},err:{:?}. dataset_id:{:?},dataset_version_id:{:?}",
+                                        chunk_num.to_string(),e,dataset_id,dataset_version_id);
+                                    }
+                                }
                             }
                         }
-                       
                     },
                     _ = shutdown_cmd_rx.recv() => {
-                        println!("[chunk_consumer_and_task_creator]: received shutdown cmd, stop upload dataset blob !!!");
+                        warn!("[DatasetChunksManager]:[chunk_consumer_and_task_creator]: received [DatasetManager] shutdown cmd, stop this dataset upload process!!! binding dataset_id:{:?},dataset_version_id:{:?}",
+                        dataset_id,dataset_version_id);
                         //Do not need to process shutdown_req err
                         //Case if shutdown_sx is dropped, also need to shutdown chunk_consumer_and_task_creator
+                        //break to stop this dataset upload process!!!
                         break;
                     }
                 }
             }
 
-            println!("[chunk_consumer_and_task_creator]: End !!!");
+            warn!("[DatasetChunksManager]:[chunk_consumer_and_task_creator]: End !!! binding dataset_id:{:?},dataset_version_id:{:?}",
+            dataset_id,dataset_version_id);
 
         });
     }
    
     async fn merge_data_chunks(&self) -> Result<()>{
 
-        let digest = Digest::new("urfs".to_string(),self.upload_dataset.id.clone());
+        let digest = Digest::new("urfs".to_string(),self.upload_dataset.digest.clone());
 
         //ToDo: digester not ztd! shold be rename to urfs or else
         let form = multipart::Form::new()
             .text("mode",DataMode::ChunkEnd.to_string())
-            .text("dataset_id","xxx")
-            .text("dataset_version_id","default")
+            .text("dataset_id",self.dataset_id.clone())
+            .text("dataset_version_id",self.dataset_version_id.clone())
             .text("digest",digest.to_string())
             .text("total_size",self.upload_dataset.compressed_size.to_string())
             .text("chunk_size",self.upload_dataset.chunk_size.to_string());
@@ -872,44 +1126,35 @@ impl DatasetChunksManager {
 
         let upload_chunk_end_url = self.upload_endpoint.clone()+"/api/v1/file/upload";
 
-        println!("[upload_chunk_task]: upload DataChunk End merge chunks,dataset hash:{:?} ,url {:?}",
-                 self.upload_dataset.id,
-                 upload_chunk_end_url);
+        info!("[DatasetChunksManager]:[merge_chunks]: send merge chunks cmd to server url {:?}. dataset_id:{:?},dataset_version_id:{:?}",
+                 upload_chunk_end_url,self.dataset_id,self.dataset_version_id);
 
-        let result = httpclient
+        let resp = httpclient
             .put(upload_chunk_end_url)
             .multipart(form)
-            .send().await;
+            .send().await?;
 
-        if let Result::Ok(resp) = result {
+        let resp_txt = resp.text().await?;
 
-            let resp_txt = resp.text().await?;
+        //ToDo: process response err？
+        info!("[DatasetChunksManager]:[merge_chunks]: get normal response from server resp: {:?}. dataset_id:{:?},dataset_version_id:{:?}",
+        resp_txt,self.dataset_id,self.dataset_version_id);
 
-            println!("[upload_chunk_end]: upload DataChunk End Ok, resp: {:?}",resp_txt);
-
-            Ok(())
-
-        }else if let Some(err) = result.err() {
-
-            error!("[upload_chunk_end]: upload DataChunk End err, dataset.id:{:?} err:{}!!!",self.upload_dataset.id,err);
-            anyhow::bail!("upload DataChunk End err,dataset.id:{:?} err:{}!!!",self.upload_dataset.id,err)
-
-        }else{
-
-            error!("[upload_chunk_end]: upload DataChunk End err, dataset.id:{:?}!!!",self.upload_dataset.id);
-            anyhow::bail!("upload DataChunk End err,dataset.id:{:?}!!!",self.upload_dataset.id)
-
-        }
+        Ok(())
+        
     }
 
-    pub async fn create_upload_chunk_task(data_chunk:DatasetChunk) -> Result<()> {
+    pub async fn create_upload_chunk_task(data_chunk:DatasetChunk) -> Result<DatasetChunkResult> {
 
         let _run_permit_by_one_dataset = data_chunk.one_dataset_sema.acquire().await?;
-        println!("[upload_chunk_task]: upload DataChunk permit by one_dataset!");
-        let _run_permit_by_all_dataset = data_chunk.all_dataset_sema.acquire().await?;
-        println!("[upload_chunk_task]: upload DataChunk permit by all_dataset!!");
 
-        println!("[upload_chunk_task]: ready to upload DataChunk:{:?}", data_chunk.chunk_seek_start);
+        debug!("[UploadChunkTask]: upload chunk permit by one_dataset! dataset_id:{},dataset_version_id:{}",
+        data_chunk.dataset_id,data_chunk.dataset_version_id);
+
+        let _run_permit_by_all_dataset = data_chunk.all_dataset_sema.acquire().await?;
+
+        debug!("[UploadChunkTask]: upload chunk permit by all_dataset! dataset_id:{},dataset_version_id:{}",
+        data_chunk.dataset_id,data_chunk.dataset_version_id);
 
         let mut chunk_length = data_chunk.dataset.chunk_size as usize;
         let mut chunk_buffer = vec![0;chunk_length];
@@ -918,10 +1163,11 @@ impl DatasetChunksManager {
             chunk_length = (data_chunk.dataset.compressed_size-data_chunk.chunk_seek_start) as usize;
             chunk_buffer = vec![0;chunk_length];
         }
-        println!("chunk_num:{} chunk_start:{} chunk_end:{} total_size:{}",data_chunk.chunk_num,
-                 data_chunk.chunk_seek_start,chunk_end,data_chunk.dataset.compressed_size);
 
-        let digest = Digest::new("urfs".to_string(),data_chunk.dataset.id.clone());
+        info!("[UploadChunkTask]: ready to upload chunk, chunk_num:{} chunk_start:{} chunk_end:{} total_size:{}, dataset_id:{},dataset_version_id:{}",
+                data_chunk.chunk_num,data_chunk.chunk_seek_start,chunk_end,data_chunk.dataset.compressed_size, data_chunk.dataset_id,data_chunk.dataset_version_id);
+
+        let digest = Digest::new("urfs".to_string(),data_chunk.dataset.digest.clone());
         let dataset_id = data_chunk.dataset_id.as_str();
         let dataset_version_id = data_chunk.dataset_version_id.as_str();
         let data_mode = DataMode::Chunk.to_string();
@@ -931,39 +1177,44 @@ impl DatasetChunksManager {
         let chunk_num = data_chunk.chunk_num;
         let chunk_start = data_chunk.chunk_seek_start;
 
-
         let chunk_file_status = stat_chunk_file(server_endpoint,data_mode.as_str(),
                                                         dataset_id,dataset_version_id,
                                                   digest.clone(),total_size,
                                                 chunk_file_size,chunk_start,chunk_num).await?;
 
-        println!("[upload_chunk_task][stat_chunk_file]: check chunk file status :{:?},chunk num:{:?}!!!",chunk_file_status,data_chunk.chunk_num.to_string());
+        info!("[UploadChunkTask]:[stat_chunk_file]: check chunk file status :{:?},chunk num:{:?}. dataset_id:{},dataset_version_id:{}",
+        chunk_file_status.to_string(),data_chunk.chunk_num.to_string(),data_chunk.dataset_id,data_chunk.dataset_version_id);
 
         //ToDo: retry upload add reliability?
         if chunk_file_status == UrchinFileStatus::UnKnown {
-            error!("[upload_chunk_task]: upload DataChunk err, chunk num:{:?}!!!",data_chunk.chunk_num.to_string());
+            warn!("[UploadChunkTask]: Upload-Chunk-Err,send to [DataChunksManager] to process! chunk file status: {:?},chunk num:{:?}. dataset_id:{},dataset_version_id:{}",
+            chunk_file_status.to_string(),data_chunk.chunk_num.to_string(),data_chunk.dataset_id,data_chunk.dataset_version_id);
 
-            data_chunk.upload_result_sender.send(DatasetChunkResult::new(
-                chunk_file_size,
-                Err(anyhow!("upload ataChunk err,chunk num:{:?}!!!",data_chunk.chunk_num.to_string()))
-            )).await?;
+            //Err(upload_chunk_result) will set uploaded_size = 0
+            let upload_chunk_result = DatasetChunkResult::new(
+                0,
+                Err(anyhow!("[UploadChunkTask]: upload chunk err,chunk file status: {:?},chunk num:{:?}. dataset_id:{},dataset_version_id:{}",
+                chunk_file_status.to_string(),data_chunk.chunk_num.to_string(),data_chunk.dataset_id,data_chunk.dataset_version_id))
+            );
 
-            anyhow::bail!("upload ataChunk err,chunk num:{:?}!!!",data_chunk.chunk_num.to_string())
+            Ok(upload_chunk_result)
+
         }else if chunk_file_status == UrchinFileStatus::Exist {
-            println!("[upload_chunk_task]: upload DataChunk Exist, finish immediately！！！");
+            info!("[UploadChunkTask]: upload chunk file exist, finish immediately, chunk num:{:?}. dataset_id:{},dataset_version_id:{}",
+            data_chunk.chunk_num.to_string(),data_chunk.dataset_id,data_chunk.dataset_version_id);
 
-            data_chunk.upload_result_sender.send(DatasetChunkResult::new(
+            let upload_chunk_result = DatasetChunkResult::new(
                 chunk_file_size,
                 Ok(())
-            )).await?;
+            );
+            
+            Ok(upload_chunk_result)
 
-            println!("[upload_chunk_task]: send upload result to chunk manager.");
-
-             Ok(())
         }else{
             //Chunk File NotFound will upload once
             //Chunk File Partial will upload overwrite
-            println!("[upload_chunk_task] chunk file NotFound or Partial, go to upload chunk num:{:?}!!!", data_chunk.chunk_num.to_string());
+            info!("[UploadChunkTask]: chunk file NotFound or Partial, ready to upload chunk file to server, chunk num:{:?}. dataset_id:{},dataset_version_id:{}",
+             data_chunk.chunk_num.to_string(),data_chunk.dataset_id,data_chunk.dataset_version_id);
             let mut dataset_file= File::open(data_chunk.upload_file_path.as_path()).await?;
 
             let dataset_file_name = data_chunk.upload_file_path.file_name().unwrap().to_str().unwrap().to_string();
@@ -991,51 +1242,26 @@ impl DatasetChunksManager {
 
             let upload_chunk_url = data_chunk.upload_endpoint+"/api/v1/file/upload";
 
-            println!("[upload_chunk_task]: upload DataChunk num:{:?} ,chunk_size:{:?} ,url {:?}",
-                     data_chunk.chunk_num.to_string(),
-                     data_chunk.dataset.chunk_size.to_string(),
-                     upload_chunk_url);
+            debug!("[UploadChunkTask]: upload chunk file to server, chunk num:{:?},url {:?}. dataset_id:{},dataset_version_id:{}", 
+            data_chunk.chunk_num.to_string(),upload_chunk_url,data_chunk.dataset_id,data_chunk.dataset_version_id);
 
-            let result = httpclient
+            let resp = httpclient
                 .put(upload_chunk_url)
                 .multipart(form)
-                .send().await;
+                .send().await?;
 
-            if let Result::Ok(resp) = result {
+            let resp_txt = resp.text().await?;
 
-                let resp_txt = resp.text().await?;
+            //ToDo: upload to server finish is upload success? 
+            debug!("[UploadChunkTask]: upload chunk file to server finish, resp: {:?}. dataset_id:{},dataset_version_id:{}",
+            resp_txt,data_chunk.dataset_id,data_chunk.dataset_version_id);
 
-                println!("[upload_chunk_task]: upload DataChunk finish, resp: {:?}",resp_txt);
-
-                data_chunk.upload_result_sender.send(DatasetChunkResult::new(
-                    chunk_file_size,
-                    Ok(())
-                )).await?;
-
-                println!("[upload_chunk_task]: send upload result to chunk manager.");
-
+            let upload_chunk_result = DatasetChunkResult::new(
+                chunk_file_size,
                 Ok(())
+            );
 
-            }else if let Some(err) = result.err() {
-
-                error!("[upload_chunk_task]: upload chunk num:{}, http access error:{}",data_chunk.chunk_num.to_string(),err.to_string());
-
-                data_chunk.upload_result_sender.send(DatasetChunkResult::new(
-                    chunk_file_size,
-                    Err(anyhow!("upload chunk num:{}, http network layer error:{}",data_chunk.chunk_num.to_string(),err.to_string()))
-                )).await?;
-
-                anyhow::bail!("upload DataChunk err,chunk num:{} err:{}!!!",data_chunk.chunk_num.to_string(),err.to_string())
-            }else{
-                //ToDo: get urchin logic error
-                error!("[upload_chunk_task]: upload chunk num:{}, urchin logic layer error",data_chunk.chunk_num.to_string());
-                data_chunk.upload_result_sender.send(DatasetChunkResult::new(
-                    chunk_file_size,
-                    Err(anyhow!("upload chunk num:{}, urchin logic layer error",data_chunk.chunk_num.to_string()))
-                )).await?;
-
-                anyhow::bail!("upload DataChunk err,chunk num:{:?}!!!",data_chunk.chunk_num.to_string())
-            }
+            Ok(upload_chunk_result)
         }
     }
 }
@@ -1102,23 +1328,23 @@ impl DatasetChunkResult {
 
 #[derive(Clone, Debug, Default,Serialize,Deserialize)]
 pub struct DatasetMeta {
-    /// A sha256 hex string generally.
+    /// A sha256 hex string digest as blob file
     #[serde(alias = "blob_id")]
-    id: String,
+    digest: String,
+    /// Message digest algorithm to process the blob.
+    digester: String,
     /// Size of the compressed blob file.
     compressed_size: u64,
+    /// Compression algorithm to process the blob.
+    compressor: String,
     /// Size of the uncompressed blob file, or the cache file.
     uncompressed_size: u64,
     /// Chunk size.
     chunk_size: u64,
     /// Number of chunks in blob file.
     /// A helper to distinguish bootstrap with extended blob table or not:
-    ///     Bootstrap with extended blob table always has non-zero `chunk_count`
+    /// Bootstrap with extended blob table always has non-zero `chunk_count`
     chunk_count: u64,
-    /// Compression algorithm to process the blob.
-    compressor: String,
-    /// Message digest algorithm to process the blob.
-    digester: String,
 }
 
 impl DatasetMeta{
