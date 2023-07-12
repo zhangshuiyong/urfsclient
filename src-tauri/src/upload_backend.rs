@@ -482,6 +482,8 @@ impl DatasetManager {
         let dataset_id = req.dataset_id.clone();
         let dataset_version_id = req.dataset_version_id.clone();
 
+        let all_dataset_chunk_sema = self.all_dataset_chunk_sema.clone();
+
         //Concurent upload futures tree
         tokio::spawn(async move {
             
@@ -493,7 +495,8 @@ impl DatasetManager {
                                                                      upload_server_endpoint,
                                                                      dataset_status_sender,
                                                       uploader_shutdown_cmd_suber,
-                                                         uploader_shutdown_cmd_rx);
+                                                         uploader_shutdown_cmd_rx,
+                                                                     all_dataset_chunk_sema);
 
             //ToDo: process upload result Error!!!
             uploader.upload().await?;
@@ -565,7 +568,9 @@ impl Drop for DatasetUploader {
 impl DatasetUploader {
     pub fn new(dataset_id:String,dataset_version_id:String,
                dataset_meta_path: PathBuf,dataset_meta:DatasetMeta,dataset_blob_path:PathBuf,upload_server_endpoint: String,
-               dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,shutdown_suber: broadcast::Sender<()>,shutdown_rx: broadcast::Receiver<()>) -> Self {
+               dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,
+               shutdown_suber: broadcast::Sender<()>,shutdown_rx: broadcast::Receiver<()>,
+               all_dataset_chunk_sema :Arc<Semaphore>) -> Self {
 
         Self {
             dataset_id,
@@ -575,7 +580,7 @@ impl DatasetUploader {
             dataset_blob_path,
             upload_server_endpoint,
             dataset_status_sender,
-            all_dataset_chunk_sema: Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY)),
+            all_dataset_chunk_sema,
             shutdown_suber,
             shutdown_rx,
         }
@@ -587,13 +592,11 @@ impl DatasetUploader {
         debug!("upload dataset_meta info:{:?}",self.dataset_meta);
         debug!("upload dataset_meta max size:{:?} TB",DatasetMeta::maxsize()?);
 
-        self.upload_meta(self.dataset_id.clone(),self.dataset_version_id.clone(),
-                         self.dataset_meta_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
+        self.upload_meta(self.dataset_id.clone(),self.dataset_version_id.clone(),self.dataset_meta_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
         debug!("upload dataset_blob_path: {:?}",self.dataset_blob_path);
 
-        self.upload_blob(self.dataset_id.clone(),self.dataset_version_id.clone(), 
-        self.dataset_blob_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
+        self.upload_blob(self.dataset_id.clone(),self.dataset_version_id.clone(), self.dataset_blob_path.clone(),self.dataset_meta.clone(),self.upload_server_endpoint.clone()).await?;
 
         Ok(())
     }
