@@ -45,3 +45,9 @@ pub struct UiStopUploadDatasetRequest{
     pub dataset_id: String,
     pub dataset_version_id: String,
 }
+
+#[derive(Serialize, Deserialize,Debug)]
+pub struct UiTerminateUploadDatasetRequest{
+    pub dataset_id: String,
+    pub dataset_version_id: String,
+}

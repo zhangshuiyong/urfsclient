@@ -62,7 +62,10 @@ async function stop_upload() {
 
 async function terminate_upload() {
     try{
-        await invoke("terminate_upload", { req :JSON.stringify({dataset_id: 'xx' })})
+        await invoke("terminate_upload", { req :JSON.stringify({
+            dataset_id: 'xxx',
+            dataset_version_id: 'default',
+          })})
         message.success("终止上传成功");
     }catch(err: any){
         message.error("终止上传错误：", err);
