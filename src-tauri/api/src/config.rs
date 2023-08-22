@@ -202,6 +202,17 @@ impl ConfigV2 {
             false
         }
     }
+
+    /// Fill authorization for registry backend.
+    pub fn update_registry_auth_info(&mut self, auth: &Option<String>) {
+        if let Some(auth) = auth {
+            if let Some(backend) = self.backend.as_mut() {
+                if let Some(registry) = backend.registry.as_mut() {
+                    registry.auth = Some(auth.to_string());
+                }
+            }
+        }
+    }
 }
 
 impl FromStr for ConfigV2 {
@@ -843,12 +854,6 @@ pub struct MirrorConfig {
     /// HTTP request headers to be passed to mirror server.
     #[serde(default)]
     pub headers: HashMap<String, String>,
-    /// Whether the authorization process is through mirror, default to false.
-    /// true: authorization through mirror, e.g. Using normal registry as mirror.
-    /// false: authorization through original registry,
-    /// e.g. when using Dragonfly server as mirror, authorization through it may affect performance.
-    #[serde(default)]
-    pub auth_through: bool,
     /// Interval for mirror health checking, in seconds.
     #[serde(default = "default_check_interval")]
     pub health_check_interval: u64,
@@ -862,7 +867,6 @@ impl Default for MirrorConfig {
         Self {
             host: String::new(),
             headers: HashMap::new(),
-            auth_through: false,
             health_check_interval: 5,
             failure_limit: 5,
             ping_url: String::new(),
@@ -1586,7 +1590,6 @@ mod tests {
         [[backend.oss.mirrors]]
         host = "http://127.0.0.1:65001"
         ping_url = "http://127.0.0.1:65001/ping"
-        auth_through = true
         health_check_interval = 10
         failure_limit = 10
         "#;
@@ -1620,7 +1623,6 @@ mod tests {
         let mirror = &oss.mirrors[0];
         assert_eq!(mirror.host, "http://127.0.0.1:65001");
         assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
-        assert!(mirror.auth_through);
         assert!(mirror.headers.is_empty());
         assert_eq!(mirror.health_check_interval, 10);
         assert_eq!(mirror.failure_limit, 10);
@@ -1652,7 +1654,6 @@ mod tests {
         [[backend.registry.mirrors]]
         host = "http://127.0.0.1:65001"
         ping_url = "http://127.0.0.1:65001/ping"
-        auth_through = true
         health_check_interval = 10
         failure_limit = 10
         "#;
@@ -1688,7 +1689,6 @@ mod tests {
         let mirror = &registry.mirrors[0];
         assert_eq!(mirror.host, "http://127.0.0.1:65001");
         assert_eq!(mirror.ping_url, "http://127.0.0.1:65001/ping");
-        assert!(mirror.auth_through);
         assert!(mirror.headers.is_empty());
         assert_eq!(mirror.health_check_interval, 10);
         assert_eq!(mirror.failure_limit, 10);
@@ -1894,5 +1894,49 @@ mod tests {
         let config = ConfigV2::new_localfs("id1", "./").unwrap();
         assert_eq!(&config.id, "id1");
         assert_eq!(config.backend.as_ref().unwrap().backend_type, "localfs");
+    }
+
+    #[test]
+    fn test_update_registry_auth_info() {
+        let config = r#"
+        {
+            "device": {
+              "id": "test",
+              "backend": {
+                "type": "registry",
+                "config": {
+                    "readahead": false,
+                    "host": "docker.io",
+                    "repo": "library/nginx",
+                    "scheme": "https",
+                    "proxy": {
+                        "fallback": false
+                    },
+                    "timeout": 5,
+                    "connect_timeout": 5,
+                    "retry_limit": 8
+                }
+              }
+            },
+            "mode": "direct",
+            "digest_validate": false,
+            "enable_xattr": true,
+            "fs_prefetch": {
+              "enable": true,
+              "threads_count": 10,
+              "merging_size": 131072,
+              "bandwidth_rate": 10485760
+            }
+          }"#;
+
+        let mut rafs_config = ConfigV2::from_str(&config).unwrap();
+        let test_auth = "test_auth".to_string();
+
+        rafs_config.update_registry_auth_info(&Some(test_auth.clone()));
+
+        let backend = rafs_config.backend.unwrap();
+        let registry = backend.registry.unwrap();
+        let auth = registry.auth.unwrap();
+        assert_eq!(auth, test_auth);
     }
 }

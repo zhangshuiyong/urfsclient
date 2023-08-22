@@ -403,14 +403,17 @@ impl Connection {
                 } else {
                     mirror_cloned.config.ping_url.clone()
                 };
-                info!("Mirror health checking url: {}", mirror_health_url);
+                info!(
+                    "[mirror] start health check, ping url: {}",
+                    mirror_health_url
+                );
 
                 let client = Client::new();
                 loop {
                     // Try to recover the mirror server when it is unavailable.
                     if !mirror_cloned.status.load(Ordering::Relaxed) {
                         info!(
-                            "Mirror server {} unhealthy, try to recover",
+                            "[mirror] server unhealthy, try to recover: {}",
                             mirror_cloned.config.host
                         );
 
@@ -422,14 +425,17 @@ impl Connection {
                                 // If the response status is less than StatusCode::INTERNAL_SERVER_ERROR,
                                 // the mirror server is recovered.
                                 if resp.status() < StatusCode::INTERNAL_SERVER_ERROR {
-                                    info!("Mirror server {} recovered", mirror_cloned.config.host);
+                                    info!(
+                                        "[mirror] server recovered: {}",
+                                        mirror_cloned.config.host
+                                    );
                                     mirror_cloned.failed_times.store(0, Ordering::Relaxed);
                                     mirror_cloned.status.store(true, Ordering::Relaxed);
                                 }
                             })
                             .map_err(|e| {
                                 warn!(
-                                    "Mirror server {} is not recovered: {}",
+                                    "[mirror] failed to recover server: {}, {}",
                                     mirror_cloned.config.host, e
                                 );
                             });
@@ -448,13 +454,6 @@ impl Connection {
         self.shutdown.store(true, Ordering::Release);
     }
 
-    /// If the auth_through is enable, all requests are send to the mirror server.
-    /// If the auth_through disabled, e.g. P2P/Dragonfly, we try to avoid sending
-    /// non-authorization request to the mirror server, which causes performance loss.
-    /// requesting_auth means this request is to get authorization from a server,
-    /// which must be a non-authorization request.
-    /// IOW, only the requesting_auth is false and the headers contain authorization token,
-    /// we send this request to mirror.
     #[allow(clippy::too_many_arguments)]
     pub fn call<R: Read + Clone + Send + 'static>(
         &self,
@@ -464,8 +463,6 @@ impl Connection {
         data: Option<ReqBody<R>>,
         headers: &mut HeaderMap,
         catch_status: bool,
-        // This means the request is dedicated to authorization.
-        requesting_auth: bool,
     ) -> ConnectionResult<Response> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(ConnectionError::Disconnected);
@@ -524,27 +521,10 @@ impl Connection {
             }
         }
 
+        let mut mirror_enabled = false;
         if !self.mirrors.is_empty() {
-            let mut fallback_due_auth = false;
+            mirror_enabled = true;
             for mirror in self.mirrors.iter() {
-                // With configuration `auth_through` disabled, we should not intend to send authentication
-                // request to mirror. Mainly because mirrors like P2P/Dragonfly has a poor performance when
-                // relaying non-data requests. But it's still possible that ever returned token is expired.
-                // So mirror might still respond us with status code UNAUTHORIZED, which should be handle
-                // by sending authentication request to the original registry.
-                //
-                // - For non-authentication request with token in request header, handle is as usual requests to registry.
-                //   This request should already take token in header.
-                // - For authentication request
-                //      1. auth_through is disabled(false): directly pass below mirror translations and jump to original registry handler.
-                //      2. auth_through is enabled(true): try to get authenticated from mirror and should also handle status code UNAUTHORIZED.
-                if !mirror.config.auth_through
-                    && (!headers.contains_key(HEADER_AUTHORIZATION) || requesting_auth)
-                {
-                    fallback_due_auth = true;
-                    break;
-                }
-
                 if mirror.status.load(Ordering::Relaxed) {
                     let data_cloned = data.as_ref().cloned();
 
@@ -556,7 +536,7 @@ impl Connection {
                     }
 
                     let current_url = mirror.mirror_url(url)?;
-                    debug!("mirror server url {}", current_url);
+                    debug!("[mirror] replace to: {}", current_url);
 
                     let result = self.call_inner(
                         &self.client,
@@ -578,14 +558,14 @@ impl Connection {
                         }
                         Err(err) => {
                             warn!(
-                                "request mirror server failed, mirror: {:?},  error: {:?}",
-                                mirror, err
+                                "[mirror] request failed, server: {:?}, {:?}",
+                                mirror.config.host, err
                             );
                             mirror.failed_times.fetch_add(1, Ordering::Relaxed);
 
                             if mirror.failed_times.load(Ordering::Relaxed) >= mirror.failure_limit {
                                 warn!(
-                                    "reach to failure limit {}, disable mirror: {:?}",
+                                    "[mirror] exceed failure limit {}, server disabled: {:?}",
                                     mirror.failure_limit, mirror
                                 );
                                 mirror.status.store(false, Ordering::Relaxed);
@@ -598,9 +578,10 @@ impl Connection {
                     headers.remove(HeaderName::from_str(key).unwrap());
                 }
             }
-            if !fallback_due_auth {
-                warn!("Request to all mirror server failed, fallback to original server.");
-            }
+        }
+
+        if mirror_enabled {
+            warn!("[mirror] request all servers failed, fallback to original server.");
         }
 
         self.call_inner(

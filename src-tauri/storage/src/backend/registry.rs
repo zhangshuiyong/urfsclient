@@ -7,11 +7,12 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::io::{Read, Result};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Once, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{fmt, thread};
 
-use arc_swap::ArcSwapOption;
+use arc_swap::{ArcSwap, ArcSwapOption};
+use base64::Engine;
 use reqwest::blocking::Response;
 pub use reqwest::header::HeaderMap;
 use reqwest::header::{HeaderValue, CONTENT_LENGTH};
@@ -34,6 +35,8 @@ const REDIRECTED_STATUS_CODE: [StatusCode; 2] = [
     StatusCode::MOVED_PERMANENTLY,
     StatusCode::TEMPORARY_REDIRECT,
 ];
+
+const REGISTRY_DEFAULT_TOKEN_EXPIRATION: u64 = 10 * 60; // in seconds
 
 /// Error codes related to registry storage backend operations.
 #[derive(Debug)]
@@ -115,13 +118,15 @@ impl HashCache {
 
 #[derive(Clone, serde::Deserialize)]
 struct TokenResponse {
+    /// Registry token string.
     token: String,
+    /// Registry token period of validity, in seconds.
     #[serde(default = "default_expires_in")]
     expires_in: u64,
 }
 
 fn default_expires_in() -> u64 {
-    10 * 60
+    REGISTRY_DEFAULT_TOKEN_EXPIRATION
 }
 
 #[derive(Debug)]
@@ -188,8 +193,8 @@ struct RegistryState {
     // Example: RwLock<HashMap<"<blob_id>", "<redirected_url>">>
     cached_redirect: HashCache,
 
-    // The expiration time of the token, which is obtained from the registry server.
-    refresh_token_time: ArcSwapOption<u64>,
+    // The epoch timestamp of token expiration, which is obtained from the registry server.
+    token_expired_at: ArcSwapOption<u64>,
     // Cache bearer auth for refreshing token.
     cached_bearer_auth: ArcSwapOption<BearerAuth>,
 }
@@ -232,7 +237,7 @@ impl RegistryState {
     }
 
     /// Request registry authentication server to get bearer token
-    fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> Result<String> {
+    fn get_token(&self, auth: BearerAuth, connection: &Arc<Connection>) -> Result<TokenResponse> {
         // The information needed for getting token needs to be placed both in
         // the query and in the body to be compatible with different registry
         // implementations, which have been tested on these platforms:
@@ -264,7 +269,6 @@ impl RegistryState {
                 Some(ReqBody::Form(form)),
                 &mut headers,
                 true,
-                true,
             )
             .map_err(|e| einval!(format!("registry auth server request failed {:?}", e)))?;
         let ret: TokenResponse = token_resp.json().map_err(|e| {
@@ -274,7 +278,7 @@ impl RegistryState {
             ))
         })?;
         if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-            self.refresh_token_time
+            self.token_expired_at
                 .store(Some(Arc::new(now_timestamp.as_secs() + ret.expires_in)));
             debug!(
                 "cached bearer auth, next time: {}",
@@ -285,7 +289,7 @@ impl RegistryState {
         // Cache bearer auth for refreshing token.
         self.cached_bearer_auth.store(Some(Arc::new(auth)));
 
-        Ok(ret.token)
+        Ok(ret)
     }
 
     fn get_auth_header(&self, auth: Auth, connection: &Arc<Connection>) -> Result<String> {
@@ -297,7 +301,7 @@ impl RegistryState {
                 .ok_or_else(|| einval!("invalid auth config")),
             Auth::Bearer(auth) => {
                 let token = self.get_token(auth, connection)?;
-                Ok(format!("Bearer {}", token))
+                Ok(format!("Bearer {}", token.token))
             }
         }
     }
@@ -361,11 +365,75 @@ impl RegistryState {
     }
 }
 
+#[derive(Clone)]
+struct First {
+    inner: Arc<ArcSwap<Once>>,
+}
+
+impl First {
+    fn new() -> Self {
+        First {
+            inner: Arc::new(ArcSwap::new(Arc::new(Once::new()))),
+        }
+    }
+
+    fn once<F>(&self, f: F)
+    where
+        F: FnOnce(),
+    {
+        self.inner.load().call_once(f)
+    }
+
+    fn renew(&self) {
+        self.inner.store(Arc::new(Once::new()));
+    }
+
+    fn handle<F, T>(&self, handle: &mut F) -> Option<BackendResult<T>>
+    where
+        F: FnMut() -> BackendResult<T>,
+    {
+        let mut ret = None;
+        // Call once twice to ensure the subsequent requests use the new
+        // Once instance after renew happens.
+        for _ in 0..=1 {
+            self.once(|| {
+                ret = Some(handle().map_err(|err| {
+                    // Replace the Once instance so that we can retry it when
+                    // the handle call failed.
+                    self.renew();
+                    err
+                }));
+            });
+            if ret.is_some() {
+                break;
+            }
+        }
+        ret
+    }
+
+    /// When invoking concurrently, only one of the handle methods will be executed first,
+    /// then subsequent handle methods will be allowed to execute concurrently.
+    ///
+    /// Nydusd uses a registry backend which generates a surge of blob requests without
+    /// auth tokens on initial startup, this caused mirror backends (e.g. dragonfly)
+    /// to process very slowly. The method implements waiting for the first blob request
+    /// to complete before making other blob requests, this ensures the first request
+    /// caches a valid registry auth token, and subsequent concurrent blob requests can
+    /// reuse the cached token.
+    fn handle_force<F, T>(&self, handle: &mut F) -> BackendResult<T>
+    where
+        F: FnMut() -> BackendResult<T>,
+    {
+        self.handle(handle).unwrap_or_else(handle)
+    }
+}
+
 struct RegistryReader {
     blob_id: String,
     connection: Arc<Connection>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
+    first: First,
 }
 
 impl RegistryReader {
@@ -419,22 +487,14 @@ impl RegistryReader {
         if let Some(data) = data {
             return self
                 .connection
-                .call(
-                    method,
-                    url,
-                    None,
-                    Some(data),
-                    &mut headers,
-                    catch_status,
-                    false,
-                )
+                .call(method, url, None, Some(data), &mut headers, catch_status)
                 .map_err(RegistryError::Request);
         }
 
         // Try to request registry server with `authorization` header
         let mut resp = self
             .connection
-            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
+            .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
             .map_err(RegistryError::Request)?;
         if resp.status() == StatusCode::UNAUTHORIZED {
             if headers.contains_key(HEADER_AUTHORIZATION) {
@@ -449,7 +509,7 @@ impl RegistryReader {
 
                 resp = self
                     .connection
-                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false, false)
+                    .call::<&[u8]>(method.clone(), url, None, None, &mut headers, false)
                     .map_err(RegistryError::Request)?;
             };
 
@@ -469,7 +529,7 @@ impl RegistryReader {
                     // Try to request registry server with `authorization` header again
                     let resp = self
                         .connection
-                        .call(method, url, None, data, &mut headers, catch_status, false)
+                        .call(method, url, None, data, &mut headers, catch_status)
                         .map_err(RegistryError::Request)?;
 
                     let status = resp.status();
@@ -524,7 +584,6 @@ impl RegistryReader {
                     None,
                     None,
                     &mut headers,
-                    false,
                     false,
                 )
                 .map_err(RegistryError::Request)?;
@@ -610,7 +669,6 @@ impl RegistryReader {
                             None,
                             &mut headers,
                             true,
-                            false,
                         )
                         .map_err(RegistryError::Request);
                     match resp_ret {
@@ -638,14 +696,20 @@ impl RegistryReader {
 
 impl BlobReader for RegistryReader {
     fn blob_size(&self) -> BackendResult<u64> {
-        let url = format!("/blobs/sha256:{}", self.blob_id);
-        let url = self
-            .state
-            .url(&url, &[])
-            .map_err(|e| RegistryError::Url(url, e))?;
+        self.first.handle_force(&mut || -> BackendResult<u64> {
+            let url = format!("/blobs/sha256:{}", self.blob_id);
+            let url = self
+                .state
+                .url(&url, &[])
+                .map_err(|e| RegistryError::Url(url, e))?;
 
-        let resp =
-            match self.request::<&[u8]>(Method::HEAD, url.as_str(), None, HeaderMap::new(), true) {
+            let resp = match self.request::<&[u8]>(
+                Method::HEAD,
+                url.as_str(),
+                None,
+                HeaderMap::new(),
+                true,
+            ) {
                 Ok(res) => res,
                 Err(RegistryError::Request(ConnectionError::Common(e)))
                     if self.state.needs_fallback_http(&e) =>
@@ -662,21 +726,26 @@ impl BlobReader for RegistryReader {
                     return Err(BackendError::Registry(e));
                 }
             };
-        let content_length = resp
-            .headers()
-            .get(CONTENT_LENGTH)
-            .ok_or_else(|| RegistryError::Common("invalid content length".to_string()))?;
+            let content_length = resp
+                .headers()
+                .get(CONTENT_LENGTH)
+                .ok_or_else(|| RegistryError::Common("invalid content length".to_string()))?;
 
-        Ok(content_length
-            .to_str()
-            .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?
-            .parse::<u64>()
-            .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?)
+            Ok(content_length
+                .to_str()
+                .map_err(|err| RegistryError::Common(format!("invalid content length: {:?}", err)))?
+                .parse::<u64>()
+                .map_err(|err| {
+                    RegistryError::Common(format!("invalid content length: {:?}", err))
+                })?)
+        })
     }
 
     fn try_read(&self, buf: &mut [u8], offset: u64) -> BackendResult<usize> {
-        self._try_read(buf, offset, true)
-            .map_err(BackendError::Registry)
+        self.first.handle_force(&mut || -> BackendResult<usize> {
+            self._try_read(buf, offset, true)
+                .map_err(BackendError::Registry)
+        })
     }
 
     fn metrics(&self) -> &BackendMetrics {
@@ -693,6 +762,7 @@ pub struct Registry {
     connection: Arc<Connection>,
     state: Arc<RegistryState>,
     metrics: Arc<BackendMetrics>,
+    first: First,
 }
 
 impl Registry {
@@ -738,37 +808,33 @@ impl Registry {
             blob_url_scheme: config.blob_url_scheme.clone(),
             blob_redirected_host: config.blob_redirected_host.clone(),
             cached_redirect: HashCache::new(),
-            refresh_token_time: ArcSwapOption::new(None),
+            token_expired_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         });
-
-        let mirrors = connection.mirrors.clone();
 
         let registry = Registry {
             connection,
             state,
             metrics: BackendMetrics::new(id, "registry"),
+            first: First::new(),
         };
 
-        for mirror in mirrors.iter() {
-            if !mirror.config.auth_through {
-                registry.start_refresh_token_thread();
-                info!("Refresh token thread started.");
-                break;
-            }
-        }
+        registry.start_refresh_token_thread();
+        info!("Refresh token thread started.");
 
         Ok(registry)
     }
 
     fn get_authorization_info(auth: &Option<String>) -> Result<(String, String)> {
         if let Some(auth) = &auth {
-            let auth: Vec<u8> = base64::decode(auth.as_bytes()).map_err(|e| {
-                einval!(format!(
-                    "Invalid base64 encoded registry auth config: {:?}",
-                    e
-                ))
-            })?;
+            let auth: Vec<u8> = base64::engine::general_purpose::STANDARD
+                .decode(auth.as_bytes())
+                .map_err(|e| {
+                    einval!(format!(
+                        "Invalid base64 encoded registry auth config: {:?}",
+                        e
+                    ))
+                })?;
             let auth = std::str::from_utf8(&auth).map_err(|e| {
                 einval!(format!(
                     "Invalid utf-8 encoded registry auth config: {:?}",
@@ -789,30 +855,39 @@ impl Registry {
     fn start_refresh_token_thread(&self) {
         let conn = self.connection.clone();
         let state = self.state.clone();
-        // The default refresh token internal is 10 minutes.
-        let refresh_check_internal = 10 * 60;
+        // FIXME: we'd better allow users to specify the expiration time.
+        let mut refresh_interval = REGISTRY_DEFAULT_TOKEN_EXPIRATION;
         thread::spawn(move || {
             loop {
                 if let Ok(now_timestamp) = SystemTime::now().duration_since(UNIX_EPOCH) {
-                    if let Some(next_refresh_timestamp) = state.refresh_token_time.load().as_deref()
-                    {
-                        // If the token will expire in next refresh check internal, get new token now.
-                        // Add 20 seconds to handle critical cases.
-                        if now_timestamp.as_secs() + refresh_check_internal + 20
-                            >= *next_refresh_timestamp
-                        {
+                    if let Some(token_expired_at) = state.token_expired_at.load().as_deref() {
+                        // If the token will expire within the next refresh interval,
+                        // refresh it immediately.
+                        if now_timestamp.as_secs() + refresh_interval >= *token_expired_at {
                             if let Some(cached_bearer_auth) =
                                 state.cached_bearer_auth.load().as_deref()
                             {
                                 if let Ok(token) =
                                     state.get_token(cached_bearer_auth.to_owned(), &conn)
                                 {
-                                    let new_cached_auth = format!("Bearer {}", token);
-                                    info!("Authorization token for registry has been refreshed.");
-                                    // Refresh authorization token
+                                    let new_cached_auth = format!("Bearer {}", token.token);
+                                    debug!(
+                                        "[refresh_token_thread] registry token has been refreshed"
+                                    );
+                                    // Refresh cached token.
                                     state
                                         .cached_auth
                                         .set(&state.cached_auth.get(), new_cached_auth);
+                                    // Reset refresh interval according to real expiration time,
+                                    // and advance 20s to handle the unexpected cases.
+                                    refresh_interval = token
+                                        .expires_in
+                                        .checked_sub(20)
+                                        .unwrap_or(token.expires_in);
+                                } else {
+                                    error!(
+                                        "[refresh_token_thread] failed to refresh registry token"
+                                    );
                                 }
                             }
                         }
@@ -822,7 +897,7 @@ impl Registry {
                 if conn.shutdown.load(Ordering::Acquire) {
                     break;
                 }
-                thread::sleep(Duration::from_secs(refresh_check_internal));
+                thread::sleep(Duration::from_secs(refresh_interval));
                 if conn.shutdown.load(Ordering::Acquire) {
                     break;
                 }
@@ -846,6 +921,7 @@ impl BlobBackend for Registry {
             state: self.state.clone(),
             connection: self.connection.clone(),
             metrics: self.metrics.clone(),
+            first: self.first.clone(),
         }))
     }
 }
@@ -914,7 +990,7 @@ mod tests {
             blob_redirected_host: "oss.alibaba-inc.com".to_string(),
             cached_auth: Default::default(),
             cached_redirect: Default::default(),
-            refresh_token_time: ArcSwapOption::new(None),
+            token_expired_at: ArcSwapOption::new(None),
             cached_bearer_auth: ArcSwapOption::new(None),
         };
 
@@ -965,5 +1041,61 @@ mod tests {
         assert_eq!(trim(Some("  test".to_owned())), Some("test".to_owned()));
         assert_eq!(trim(Some("  te st  ".to_owned())), Some("te st".to_owned()));
         assert_eq!(trim(Some("te st".to_owned())), Some("te st".to_owned()));
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn test_first_basically() {
+        let first = First::new();
+        let mut val = 0;
+        first.once(|| {
+            val += 1;
+        });
+        assert_eq!(val, 1);
+
+        first.clone().once(|| {
+            val += 1;
+        });
+        assert_eq!(val, 1);
+
+        first.renew();
+        first.clone().once(|| {
+            val += 1;
+        });
+        assert_eq!(val, 2);
+    }
+
+    #[test]
+    #[allow(clippy::redundant_clone)]
+    fn test_first_concurrently() {
+        let val = Arc::new(ArcSwap::new(Arc::new(0)));
+        let first = First::new();
+
+        let mut handlers = Vec::new();
+        for _ in 0..100 {
+            let val_cloned = val.clone();
+            let first_cloned = first.clone();
+            handlers.push(std::thread::spawn(move || {
+                let _ = first_cloned.handle(&mut || -> BackendResult<()> {
+                    let val = val_cloned.load();
+                    let ret = if *val.as_ref() == 0 {
+                        std::thread::sleep(std::time::Duration::from_secs(2));
+                        Err(BackendError::Registry(RegistryError::Common(String::from(
+                            "network error",
+                        ))))
+                    } else {
+                        Ok(())
+                    };
+                    val_cloned.store(Arc::new(val.as_ref() + 1));
+                    ret
+                });
+            }));
+        }
+
+        for handler in handlers {
+            handler.join().unwrap();
+        }
+
+        assert_eq!(*val.load().as_ref(), 2);
     }
 }

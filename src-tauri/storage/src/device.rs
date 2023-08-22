@@ -698,7 +698,7 @@ pub struct BlobIoVec {
     /// The blob associated with the IO operation.
     bi_blob: Arc<BlobInfo>,
     /// Total size of blob IOs to be performed.
-    bi_size: u32,
+    bi_size: u64,
     /// Array of blob IOs, these IOs should executed sequentially.
     pub(crate) bi_vec: Vec<BlobIoDesc>,
 }
@@ -717,14 +717,13 @@ impl BlobIoVec {
     pub fn push(&mut self, desc: BlobIoDesc) {
         assert_eq!(self.bi_blob.blob_index(), desc.blob.blob_index());
         assert_eq!(self.bi_blob.blob_id(), desc.blob.blob_id());
-        assert!(self.bi_size.checked_add(desc.size).is_some());
-        self.bi_size += desc.size;
+        assert!(self.bi_size.checked_add(desc.size as u64).is_some());
+        self.bi_size += desc.size as u64;
         self.bi_vec.push(desc);
     }
 
     /// Append another blob io vector to current one.
     pub fn append(&mut self, mut vec: BlobIoVec) {
-        assert_eq!(self.bi_blob.blob_index(), vec.bi_blob.blob_index());
         assert_eq!(self.bi_blob.blob_id(), vec.bi_blob.blob_id());
         assert!(self.bi_size.checked_add(vec.bi_size).is_some());
         self.bi_vec.append(vec.bi_vec.as_mut());
@@ -748,7 +747,7 @@ impl BlobIoVec {
     }
 
     /// Get size of pending IO data.
-    pub fn size(&self) -> u32 {
+    pub fn size(&self) -> u64 {
         self.bi_size
     }
 
@@ -1435,5 +1434,106 @@ mod tests {
         assert!(!desc2.is_continuous(&desc3, 0x400));
         assert!(desc2.is_continuous(&desc3, 0x800));
         assert!(desc2.is_continuous(&desc3, 0x1000));
+    }
+
+    #[test]
+    fn test_append_same_blob_with_diff_index() {
+        let blob1 = Arc::new(BlobInfo::new(
+            1,
+            "test1".to_owned(),
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+        ));
+        let chunk1 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 1,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0,
+            uncompress_offset: 0,
+            file_offset: 0,
+            index: 0,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let mut iovec = BlobIoVec::new(blob1.clone());
+        iovec.push(BlobIoDesc::new(blob1, BlobIoChunk(chunk1), 0, 0x1000, true));
+
+        let blob2 = Arc::new(BlobInfo::new(
+            2,                  // different index
+            "test1".to_owned(), // same id
+            0x200000,
+            0x100000,
+            0x100000,
+            512,
+            BlobFeatures::_V5_NO_EXT_BLOB_TABLE,
+        ));
+        let chunk2 = Arc::new(MockChunkInfo {
+            block_id: Default::default(),
+            blob_index: 2,
+            flags: BlobChunkFlags::empty(),
+            compress_size: 0x800,
+            uncompress_size: 0x1000,
+            compress_offset: 0x800,
+            uncompress_offset: 0x1000,
+            file_offset: 0x1000,
+            index: 1,
+            reserved: 0,
+        }) as Arc<dyn BlobChunkInfo>;
+        let mut iovec2 = BlobIoVec::new(blob2.clone());
+        iovec2.push(BlobIoDesc::new(blob2, BlobIoChunk(chunk2), 0, 0x1000, true));
+
+        iovec.append(iovec2);
+        assert_eq!(0x2000, iovec.bi_size);
+    }
+
+    #[test]
+    fn test_extend_large_blob_io_vec() {
+        let size = 0x2_0000_0000; // 8G blob
+        let chunk_size = 0x10_0000; // 1M chunk
+        let chunk_count = (size / chunk_size as u64) as u32;
+        let large_blob = Arc::new(BlobInfo::new(
+            0,
+            "blob_id".to_owned(),
+            size,
+            size,
+            chunk_size,
+            chunk_count,
+            BlobFeatures::default(),
+        ));
+
+        let mut iovec = BlobIoVec::new(large_blob.clone());
+        let mut iovec2 = BlobIoVec::new(large_blob.clone());
+
+        // Extend half of blob
+        for chunk_idx in 0..chunk_count {
+            let chunk = Arc::new(MockChunkInfo {
+                block_id: Default::default(),
+                blob_index: large_blob.blob_index,
+                flags: BlobChunkFlags::empty(),
+                compress_size: chunk_size,
+                compress_offset: chunk_idx as u64 * chunk_size as u64,
+                uncompress_size: 2 * chunk_size,
+                uncompress_offset: 2 * chunk_idx as u64 * chunk_size as u64,
+                file_offset: 2 * chunk_idx as u64 * chunk_size as u64,
+                index: chunk_idx as u32,
+                reserved: 0,
+            }) as Arc<dyn BlobChunkInfo>;
+            let desc = BlobIoDesc::new(large_blob.clone(), BlobIoChunk(chunk), 0, chunk_size, true);
+            if chunk_idx < chunk_count / 2 {
+                iovec.push(desc);
+            } else {
+                iovec2.push(desc)
+            }
+        }
+
+        // Extend other half of blob
+        iovec.append(iovec2);
+
+        assert_eq!(size, iovec.size());
+        assert_eq!(chunk_count, iovec.len() as u32);
     }
 }

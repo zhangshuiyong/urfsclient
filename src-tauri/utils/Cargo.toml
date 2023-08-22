@@ -15,7 +15,7 @@ libc = "0.2"
 log = "0.4"
 lz4-sys = "1.9.4"
 lz4 = "1.24.0"
-openssl = { version = "0.10.48", features = ["vendored"], optional = true }
+openssl = { version = "0.10.55", features = ["vendored"], optional = true }
 serde = { version = ">=1.0.27", features = ["serde_derive", "rc"] }
 serde_json = ">=1.0.9"
 sha2 = "0.10.0"
@@ -34,8 +34,8 @@ libz-sys = { version = "1.1.8", features = ["zlib-ng"], default-features = false
 flate2 = { version = "1.0.17", features = ["zlib-ng-compat"], default-features = false }
 
 [dev-dependencies]
-vmm-sys-util = "0.10.0"
-tar = "0.4.38"
+vmm-sys-util = "0.11.0"
+tar = "0.4.40"
 
 [features]
 zran = ["libz-sys"]

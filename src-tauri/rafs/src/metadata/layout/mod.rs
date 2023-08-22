@@ -255,13 +255,12 @@ impl RafsXAttrs {
 
     /// Add or update an extended attribute.
     pub fn add(&mut self, name: OsString, value: XattrValue) -> Result<()> {
-        //println!("!!!add xattr!!! {:?} {:?}", name, value);
         let buf = name.as_bytes();
         if buf.len() > 255 || value.len() > 0x10000 {
             return Err(einval!("xattr key/value is too big"));
         }
         for p in RAFS_XATTR_PREFIXES {
-            if buf.len() > p.as_bytes().len() && &buf[..p.as_bytes().len()] == p.as_bytes() {
+            if buf.len() >= p.as_bytes().len() && &buf[..p.as_bytes().len()] == p.as_bytes() {
                 self.pairs.insert(name, value);
                 return Ok(());
             }
