@@ -12,7 +12,7 @@ use nydus_api::ConfigV2;
 use nydus_rafs::metadata::RafsSuper;
 use nydus_storage::device::BlobInfo;
 
-use crate::tree::Tree;
+use crate::core::tree::Tree;
 
 pub struct Validator {
     sb: RafsSuper,

@@ -11,7 +11,7 @@ use indexmap::IndexMap;
 use nydus_rafs::metadata::layout::v5::RafsV5PrefetchTable;
 use nydus_rafs::metadata::layout::v6::{calculate_nid, RafsV6PrefetchTable};
 
-use crate::node::Node;
+use crate::core::node::Node;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PrefetchPolicy {

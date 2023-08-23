@@ -26,6 +26,12 @@ import ***info***, ***warn***, ***error***, and ***debug*** functions,for exampl
 >
 > info("[ui] click btn");
 
+### Urchinclient app Path:
+
+
+https://tauri.app/v1/api/js/path/#localdatadir
+
+
 # How to use nydus-image cmd to create urchin image from a dir
 
 > meta文件名固定为‘mata’，blob文件名自动生成。默认生成最新的v6版本镜像，以下为命令:

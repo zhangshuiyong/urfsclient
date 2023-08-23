@@ -13,6 +13,20 @@
   "tauri": {
     "allowlist": {
       "all": false,
+      "path": {
+        "all": true
+      },
+      "fs": {
+        "all": false,
+        "scope": ["$APPDATA/*","$APPCACHE/*"],
+        "readFile": true,
+        "writeFile": true,
+        "removeFile": true,
+        "createDir": true,
+        "readDir": true,
+        "removeDir": true,
+        "exists": true
+      },
       "shell": {
         "all": false,
         "open": true
