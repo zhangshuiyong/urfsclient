@@ -34,18 +34,19 @@ async function select_upload_fold() {
     }
 }
 
-async function star_upload() {
+async function star_upload(source:string, isDir:boolean) {
 
     const appCacheDirPath = await appCacheDir();
 
-    info("[ui] star_upload appCacheDirPath:"+appCacheDirPath);
+    info(`[ui] star_upload source path:${source}, isDir:${isDir}, appCacheDirPath:${appCacheDirPath}`);
 
     try{
         await invoke("start_upload", { req :JSON.stringify({
             dataset_id: 'xxx',
             dataset_version_id: 'default',
             dataset_cache_dir: appCacheDirPath,
-            dataset_image_dir: '/Users/terrill/Documents/urchin/zhangshuiyong/urfs/tests/cifar-10-image',
+            dataset_source_is_dir: isDir,
+            dataset_source: source,//'/Users/terrill/Documents/urchin/zhangshuiyong/urfs/tests/cifar-10-image',
             server_endpoint: 'http://0.0.0.0:65004'
         })})
 
@@ -110,7 +111,7 @@ async function get_history() {
     <template #renderItem="{ item }">
       <a-list-item>
         <template #actions>
-          <a key="star_upload" @click="star_upload()">开始上传</a>
+          <a key="star_upload" @click="star_upload(item.name,item.isDir)">开始上传</a>
           <a key="stop_upload" @click="stop_upload()">暂停上传</a>
           <a key="terminate_upload" @click="terminate_upload()">终止上传</a>
         </template>

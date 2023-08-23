@@ -1,6 +1,7 @@
 
 //======== dataset_image_cmd.rs ==========
 use crate::dataset_image_cmd;
+use sha2::{Digest,Sha256};
 //======== dataset_image_cmd.rs ==========
 
 use std::collections::HashMap;
@@ -85,11 +86,11 @@ impl From<i32> for DataMode{
 }
 
 #[derive(Debug,PartialEq,Clone)]
-struct Digest{
+struct DatasetDigest{
     algorithm: String,
     hash: String
 }
-impl Digest {
+impl DatasetDigest {
     pub fn new(algo:String, hash_str: String) -> Self {
         Self {
             algorithm: algo,
@@ -98,7 +99,7 @@ impl Digest {
     }
 }
 
-impl fmt::Display for Digest {
+impl fmt::Display for DatasetDigest {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}:{}", self.algorithm,self.hash)
     }
@@ -189,7 +190,7 @@ impl fmt::Display for UrchinFileStatus {
     }
 }
 
-async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_version_id:&str,digest: &Digest,total_size:u64) -> Result<UrchinFileStatus> {
+async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_version_id:&str,digest: &DatasetDigest,total_size:u64) -> Result<UrchinFileStatus> {
 
     let httpclient = get_http_client()?;
 
@@ -227,7 +228,7 @@ async fn stat_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_versi
 }
 
 async fn stat_chunk_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset_version_id:&str,
-                         digest: Digest,total_size:u64,
+                         digest: DatasetDigest,total_size:u64,
                          chunk_size:u64,chunk_start:u64,chunk_num:u64) -> Result<UrchinFileStatus> {
 
     let httpclient = get_http_client()?;
@@ -354,9 +355,14 @@ impl DatasetManager {
                         "start_upload" => {
                             debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
                             
-                            let result = self.create_dataset_image(req_json.clone()).await;
+                            let mut result;
+                            
+                            result = self.create_dataset_image(req_json.clone()).await;
 
-                            //let result = self.start_dataset_uploader(req_json).await;
+                            if result.is_ok() {
+                                result = self.start_dataset_uploader(req_json).await;
+                            }
+                            
                             debug!("[DatasetManager]: ui_cmd_collector cmd: {}, result: {:?},",cmd,result);
 
                             match result {
@@ -511,28 +517,63 @@ impl DatasetManager {
        debug!("get_history:{:?}",self.upload_dataset_history); 
     }
 
+    fn sha256_hash(&self,data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        format!("{:x}", hasher.finalize())
+    }
 
     async fn create_dataset_image(&mut self, req_json:String) -> Result<()> {
 
         let req =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json)?;
-                            
-        let dataset_cache_path = Path::new(req.dataset_cache_dir.as_str());
 
-        if ensure_directory(dataset_cache_path.clone()).is_err() {
-            info!("dataset_cache_dir:{:?} not exist!!!",dataset_cache_path);
-            tokio::fs::create_dir_all(dataset_cache_path).await?;
+        let source_hash = self.sha256_hash(req.dataset_source.as_bytes());
+
+        let dataset_cache_dir = Path::new(req.dataset_cache_dir.as_str());
+
+        let source_image_dir = dataset_cache_dir.join(source_hash);
+
+        if ensure_directory(source_image_dir.as_path()).is_err() {
+            info!("source_image_dir:{:?} not exist!!!",source_image_dir);
+            tokio::fs::create_dir_all(source_image_dir.as_path()).await?;
         };
 
-        info!("dataset_cache_dir exist:{:?}",dataset_cache_path);
+        info!("source_image_dir exist:{:?}",source_image_dir);
+
+        let meta_file_path_buf = source_image_dir.join("meta");
+
+        let meta_file_path_op = meta_file_path_buf.as_path().as_os_str().to_str();
+        if meta_file_path_op.is_none() {
+            error!("failed to get meta_file_path: none");
+            return Err(anyhow!("failed to get meta_file_path: none"));
+        }
+
+        let source_image_dir_op = source_image_dir.as_os_str().to_str();
+        if source_image_dir_op.is_none() {
+            error!("failed to get source_image_dir: none");
+            return Err(anyhow!("failed to get source_image_dir: none"));
+        }
+
+        let mut arg_vec = vec![];
+
+        if req.dataset_source_is_dir{
+            arg_vec = vec!["","create","-B", meta_file_path_op.unwrap_or_default(),"-D",source_image_dir_op.unwrap_or_default(),req.dataset_source.as_str()];
+        }
+        
+        info!("urchin dataset image command:{:?}",arg_vec);
+
+        let result = self.execute_dataset_image_cmd(arg_vec).await;
+
+        return result;
+    }
+
+    async fn execute_dataset_image_cmd(&mut self, arg_vec:Vec<&str>) -> Result<()> {
 
         let build_info = dataset_image_cmd::BTI.to_owned();
         let mut app = dataset_image_cmd::prepare_cmd_args(dataset_image_cmd::BTI_STRING.as_str());
         let usage = app.render_usage();
         
-        let arg_vec = vec!["","check","-B", "/Users/terrill/Documents/urchin/urchin2/urfs/tests/texture/bootstrap/rafs-v5.boot","-v"];
         let cmd = app.get_matches_from(arg_vec);
-
-        info!("urchin dataset image cmd {:?}",cmd);
 
         let mut result = Ok(());
 
@@ -562,17 +603,22 @@ impl DatasetManager {
         Ok(())
     }
 
+
     async fn start_dataset_uploader(&mut self, req_json:String) -> Result<()> {
        
         let req =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json)?;
                             
-        let dataset_image_path = Path::new(req.dataset_image_dir.as_str());
+        let source_hash = self.sha256_hash(req.dataset_source.as_bytes());
 
-        ensure_directory(dataset_image_path.clone())?;
+        let dataset_cache_dir = Path::new(req.dataset_cache_dir.as_str());
 
-        let dataset_meta_path = dataset_image_path.join("meta");
+        let source_image_dir = dataset_cache_dir.join(source_hash);
 
-        debug!("dataset_image_dir:{:?},dataset_meta_path: {:?}",dataset_image_path,dataset_meta_path);
+        ensure_directory(source_image_dir.as_path())?;
+
+        let dataset_meta_path = source_image_dir.join("meta");
+
+        debug!("dataset_source:{:?},source_image_dir:{:?}, dataset_meta_path: {:?}",req.dataset_source,source_image_dir, dataset_meta_path);
 
         let blobs_info_json =  inspect_blob_info(dataset_meta_path.as_path())?;
 
@@ -582,7 +628,7 @@ impl DatasetManager {
 
         let upload_dataset_meta = dataset_meta.clone();
 
-        let dataset_blob_path = dataset_image_path.join(upload_dataset_meta.digest.as_str());
+        let dataset_blob_path = source_image_dir.join(upload_dataset_meta.digest.as_str());
 
         let upload_server_endpoint = req.server_endpoint.clone();
 
@@ -721,7 +767,7 @@ impl DatasetUploader {
         debug!("[DatasetUploader]:[upload_meta], local meta file info {:?}. dataset_id:{}, dataset_version_id:{}", 
         local_meta_file_info,dataset_id,dataset_version_id);
 
-        let digest = Digest::new("urfs".to_string(),dataset_meta.digest.clone());
+        let digest = DatasetDigest::new("urfs".to_string(),dataset_meta.digest.clone());
         let meta_file_size = local_meta_file_info.len();
         let data_mode = DataMode::Meta.to_string();
 
@@ -789,7 +835,7 @@ impl DatasetUploader {
 
     async fn upload_blob(&mut self, dataset_id:String, dataset_version_id:String,dataset_blob_path: PathBuf,dataset_meta:DatasetMeta,server_endpoint: String) -> Result<()> {
 
-        let digest = Digest::new("urfs".to_string(),dataset_meta.digest.clone());
+        let digest = DatasetDigest::new("urfs".to_string(),dataset_meta.digest.clone());
 
         let blob_file_status = stat_file(server_endpoint.as_str(),DataMode::Blob.to_string().as_str(),
                                          dataset_id.as_str(),dataset_version_id.as_str(),
@@ -1246,7 +1292,7 @@ impl DatasetChunksManager {
    
     async fn merge_data_chunks(&self) -> Result<()>{
 
-        let digest = Digest::new("urfs".to_string(),self.upload_dataset.digest.clone());
+        let digest = DatasetDigest::new("urfs".to_string(),self.upload_dataset.digest.clone());
 
         //ToDo: digester not ztd! shold be rename to urfs or else
         let form = multipart::Form::new()
@@ -1302,7 +1348,7 @@ impl DatasetChunksManager {
         info!("[UploadChunkTask]: ready to upload chunk, chunk_num:{} chunk_start:{} chunk_end:{} total_size:{}, dataset_id:{},dataset_version_id:{}",
                 data_chunk.chunk_num,data_chunk.chunk_seek_start,chunk_end,data_chunk.dataset.compressed_size, data_chunk.dataset_id,data_chunk.dataset_version_id);
 
-        let digest = Digest::new("urfs".to_string(),data_chunk.dataset.digest.clone());
+        let digest = DatasetDigest::new("urfs".to_string(),data_chunk.dataset.digest.clone());
         let dataset_id = data_chunk.dataset_id.as_str();
         let dataset_version_id = data_chunk.dataset_version_id.as_str();
         let data_mode = DataMode::Chunk.to_string();

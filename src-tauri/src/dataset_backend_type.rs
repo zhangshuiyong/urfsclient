@@ -37,7 +37,8 @@ pub struct UiStartUploadDatasetRequest{
     pub dataset_id: String,
     pub dataset_version_id: String,
     pub dataset_cache_dir: String,
-    pub dataset_image_dir: String,
+    pub dataset_source_is_dir: bool,
+    pub dataset_source: String,
     pub server_endpoint: String,
 }
 
