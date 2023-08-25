@@ -51,3 +51,8 @@ https://github.com/dragonflyoss/image-service/issues/1258
 
 # How to use nydus-image cmd to unpack urchin image files
 > ./nydus-image unpack -b ${blob文件路径} --output ./a.tar ${meta文件路径}
+
+# What is xattr(com.apple.quarantine) in macos
+
+https://www.cnblogs.com/Flat-White/p/17153264.html
+
