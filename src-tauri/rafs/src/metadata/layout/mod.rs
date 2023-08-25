@@ -212,12 +212,13 @@ pub fn parse_xattr_value(data: &[u8], size: usize, name: &OsStr) -> Result<Optio
 /// Valid prefixes of extended attributes
 ///
 /// Please keep in consistence with `RAFSV6_XATTR_TYPES`.
-pub const RAFS_XATTR_PREFIXES: [&str; 5] = [
+pub const RAFS_XATTR_PREFIXES: [&str; 6] = [
     "user.",
     "security.",
     "trusted.",
     "system.posix_acl_access",
     "system.posix_acl_default",
+    "com.apple.",
 ];
 
 /// Rafs inode extended attributes.

@@ -36,6 +36,7 @@ use crate::dataset_backend_type::UiTerminateUploadDatasetRequest;
 #[derive(Debug,Clone)]
 pub enum DataSetStatus{
     Init,
+    ReadyUpload,
     Uploading(f32),
     Stop,
     AsyncProcessing,
@@ -346,7 +347,7 @@ impl DatasetManager {
                     debug!("[DatasetManager]: received dataset_status: {:?}. dataset_id:{},dataset_version_id:{}",
                     dataset_status,dataset_id,dataset_version_id);
         
-                    self.set_dataset_status_if_exist(dataset_id,dataset_version_id, dataset_status);
+                    self.set_dataset_status_if_exist(dataset_id.as_str(),dataset_version_id.as_str(), dataset_status);
                 },
                 //allow ui_cmd_sender free!
                 Some((cmd,req_json,resp_sender)) =  self.ui_cmd_collector.recv() => {
@@ -355,25 +356,46 @@ impl DatasetManager {
                         "start_upload" => {
                             debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
                             
-                            let mut result;
+                            let req_json_result =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json);
                             
-                            result = self.create_dataset_image(req_json.clone()).await;
+                            match req_json_result {
+                                std::result::Result::Ok(req) => {
+                                    
+                                    let mut result;
 
-                            if result.is_ok() {
-                                result = self.start_dataset_uploader(req_json).await;
-                            }
-                            
-                            debug!("[DatasetManager]: ui_cmd_collector cmd: {}, result: {:?},",cmd,result);
+                                    result = self.create_dataset_image(req.clone()).await;
 
-                            match result {
-                                std::result::Result::Ok(_) => {
-
-                                    let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
-
-                                    if resp_sender.send(resp).is_err(){
-                                            //Do not need process next step, here is Err-Topest-Process Layer!
-                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                    if result.is_ok() {
+                                        result = self.start_dataset_uploader(req.clone()).await;
+                                    }else{
+                                        self.set_dataset_status(req.dataset_id.as_str(),req.dataset_version_id.as_str(), DataSetStatus::Failed);
                                     }
+
+                                    debug!("[DatasetManager]: ui_cmd_collector cmd: {}, result: {:?},",cmd,result);
+
+                                    match result {
+                                        std::result::Result::Ok(_) => {
+
+                                            let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
+
+                                            if resp_sender.send(resp).is_err(){
+                                                    //Do not need process next step, here is Err-Topest-Process Layer!
+                                                    error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                            }
+                                        },
+                                        std::result::Result::Err(e)=> {
+
+                                            let resp = UiResponse{status_code: -1, status_msg: e.to_string()};
+
+                                            if resp_sender.send(resp).is_err(){
+                                                    //Do not need process next step, here is Err-Topest-Process Layer!
+                                                    error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                            }
+                                        }
+                                    }
+
+                                    //result = self.delete_dataset_image_cache(req.clone()).await;
+                                    //debug!("[DatasetManager]: ui_cmd_collector cmd: {}, delete_dataset_image_cache, result: {:?},",cmd,result);
                                 },
                                 std::result::Result::Err(e)=> {
 
@@ -385,6 +407,7 @@ impl DatasetManager {
                                     }
                                 }
                             }
+                            
                         },
                         "stop_upload" => {
                             debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
@@ -479,11 +502,11 @@ impl DatasetManager {
         }
     }
 
-    fn set_dataset_status(&mut self,dataset_id:String,dataset_version_id:String,status:DataSetStatus) {
+    fn set_dataset_status(&mut self,dataset_id:&str,dataset_version_id:&str,status:DataSetStatus) {
         self.upload_dataset_history.insert(format!("{}:{}",dataset_id,dataset_version_id),status);
     }
 
-    fn set_dataset_status_if_exist(&mut self,dataset_id:String,dataset_version_id:String,status:DataSetStatus) {
+    fn set_dataset_status_if_exist(&mut self,dataset_id:&str,dataset_version_id:&str,status:DataSetStatus) {
         let status_key = format!("{}:{}",dataset_id,dataset_version_id);
         if self.upload_dataset_history.contains_key(&status_key) {
             self.upload_dataset_history.insert(status_key,status);
@@ -523,24 +546,28 @@ impl DatasetManager {
         format!("{:x}", hasher.finalize())
     }
 
-    async fn create_dataset_image(&mut self, req_json:String) -> Result<()> {
+    fn get_dataset_image_cache_path(&self,dataset_cache_dir: &str,dataset_source: &str) -> PathBuf {
+        let source_hash: String = self.sha256_hash(dataset_source.as_bytes());
 
-        let req =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json)?;
+        let dataset_cache_dir = Path::new(dataset_cache_dir);
 
-        let source_hash = self.sha256_hash(req.dataset_source.as_bytes());
+        dataset_cache_dir.join(source_hash)
+    }
 
-        let dataset_cache_dir = Path::new(req.dataset_cache_dir.as_str());
+    async fn create_dataset_image(&mut self, req:UiStartUploadDatasetRequest) -> Result<()> {
 
-        let source_image_dir = dataset_cache_dir.join(source_hash);
+        self.set_dataset_status(req.dataset_id.as_str(),req.dataset_version_id.as_str(), DataSetStatus::Init);
 
-        if ensure_directory(source_image_dir.as_path()).is_err() {
-            info!("source_image_dir:{:?} not exist!!!",source_image_dir);
-            tokio::fs::create_dir_all(source_image_dir.as_path()).await?;
+        let dataset_image_cache_path = self.get_dataset_image_cache_path(req.dataset_cache_dir.as_str(),req.dataset_source.as_str());
+
+        if ensure_directory(dataset_image_cache_path.as_path()).is_err() {
+            info!("dataset_image_cache_path:{:?} not exist!!!",dataset_image_cache_path);
+            tokio::fs::create_dir_all(dataset_image_cache_path.as_path()).await?;
         };
 
-        info!("source_image_dir exist:{:?}",source_image_dir);
+        info!("source_image_dir exist:{:?}",dataset_image_cache_path);
 
-        let meta_file_path_buf = source_image_dir.join("meta");
+        let meta_file_path_buf = dataset_image_cache_path.join("meta");
 
         let meta_file_path_op = meta_file_path_buf.as_path().as_os_str().to_str();
         if meta_file_path_op.is_none() {
@@ -548,23 +575,27 @@ impl DatasetManager {
             return Err(anyhow!("failed to get meta_file_path: none"));
         }
 
-        let source_image_dir_op = source_image_dir.as_os_str().to_str();
+        let source_image_dir_op = dataset_image_cache_path.as_os_str().to_str();
         if source_image_dir_op.is_none() {
             error!("failed to get source_image_dir: none");
             return Err(anyhow!("failed to get source_image_dir: none"));
         }
 
-        let mut arg_vec = vec![];
-
-        if req.dataset_source_is_dir{
-            arg_vec = vec!["","create","-B", meta_file_path_op.unwrap_or_default(),"-D",source_image_dir_op.unwrap_or_default(),req.dataset_source.as_str()];
-        }
+        let arg_vec = vec!["","create","-B", meta_file_path_op.unwrap_or_default(),"-D",source_image_dir_op.unwrap_or_default(),req.dataset_source.as_str()];
         
-        info!("urchin dataset image command:{:?}",arg_vec);
+        info!("urchin dataset image create command:{:?}",arg_vec);
 
         let result = self.execute_dataset_image_cmd(arg_vec).await;
 
         return result;
+    }
+
+    async fn delete_dataset_image_cache(&mut self, req:UiStartUploadDatasetRequest) -> Result<()> {
+
+        let dataset_image_cache_path = self.get_dataset_image_cache_path(req.dataset_cache_dir.as_str(),req.dataset_source.as_str());
+
+        tokio::fs::remove_dir_all(dataset_image_cache_path).await?;
+        Ok(())
     }
 
     async fn execute_dataset_image_cmd(&mut self, arg_vec:Vec<&str>) -> Result<()> {
@@ -604,21 +635,15 @@ impl DatasetManager {
     }
 
 
-    async fn start_dataset_uploader(&mut self, req_json:String) -> Result<()> {
+    async fn start_dataset_uploader(&mut self, req:UiStartUploadDatasetRequest) -> Result<()> {
        
-        let req =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json)?;
-                            
-        let source_hash = self.sha256_hash(req.dataset_source.as_bytes());
+        let dataset_image_cache_path = self.get_dataset_image_cache_path(req.dataset_cache_dir.as_str(),req.dataset_source.as_str());
 
-        let dataset_cache_dir = Path::new(req.dataset_cache_dir.as_str());
+        ensure_directory(dataset_image_cache_path.as_path())?;
 
-        let source_image_dir = dataset_cache_dir.join(source_hash);
+        let dataset_meta_path = dataset_image_cache_path.join("meta");
 
-        ensure_directory(source_image_dir.as_path())?;
-
-        let dataset_meta_path = source_image_dir.join("meta");
-
-        debug!("dataset_source:{:?},source_image_dir:{:?}, dataset_meta_path: {:?}",req.dataset_source,source_image_dir, dataset_meta_path);
+        debug!("dataset_source:{:?},dataset_image_cache_path:{:?}, dataset_meta_path: {:?}",req.dataset_source,dataset_image_cache_path, dataset_meta_path);
 
         let blobs_info_json =  inspect_blob_info(dataset_meta_path.as_path())?;
 
@@ -628,7 +653,7 @@ impl DatasetManager {
 
         let upload_dataset_meta = dataset_meta.clone();
 
-        let dataset_blob_path = source_image_dir.join(upload_dataset_meta.digest.as_str());
+        let dataset_blob_path = dataset_image_cache_path.join(upload_dataset_meta.digest.as_str());
 
         let upload_server_endpoint = req.server_endpoint.clone();
 
@@ -665,7 +690,7 @@ impl DatasetManager {
 
         // after Concurent create DatasetUploader, should add meta to DatasetManager
         self.set_dataset_uploader_shutdown_cmd_sender(req.dataset_id.clone(), req.dataset_version_id.clone(), uploader_shutdown_cmd_sx);
-        self.set_dataset_status(req.dataset_id.clone(),req.dataset_version_id.clone(), DataSetStatus::Init);
+        self.set_dataset_status(req.dataset_id.as_str(),req.dataset_version_id.as_str(), DataSetStatus::ReadyUpload);
 
         Ok(())
 

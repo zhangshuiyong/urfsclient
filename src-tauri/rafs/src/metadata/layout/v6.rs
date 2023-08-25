@@ -1679,12 +1679,14 @@ const EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT: u8 = 3;
 const EROFS_XATTR_INDEX_TRUSTED: u8 = 4;
 // const EROFS_XATTR_INDEX_LUSTRE: u8 = 5;
 const EROFS_XATTR_INDEX_SECURITY: u8 = 6;
+const EROFS_XATTR_INDEX_APPLE: u8 = 7;
 
 const XATTR_USER_PREFIX: &str = "user.";
 const XATTR_SECURITY_PREFIX: &str = "security.";
 const XATTR_TRUSTED_PREFIX: &str = "trusted.";
 const XATTR_NAME_POSIX_ACL_ACCESS: &str = "system.posix_acl_access";
 const XATTR_NAME_POSIX_ACL_DEFAULT: &str = "system.posix_acl_default";
+const XATTR_APPLE_PREFIX: &str = "com.apple.";
 
 struct RafsV6XattrPrefix {
     index: u8,
@@ -1728,6 +1730,11 @@ lazy_static! {
             XATTR_SECURITY_PREFIX,
             EROFS_XATTR_INDEX_SECURITY,
             XATTR_SECURITY_PREFIX.as_bytes().len()
+        ),
+        RafsV6XattrPrefix::new(
+            XATTR_APPLE_PREFIX,
+            EROFS_XATTR_INDEX_APPLE,
+            XATTR_APPLE_PREFIX.as_bytes().len()
         ),
     ];
 }
