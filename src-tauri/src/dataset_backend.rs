@@ -1,7 +1,6 @@
 
 //======== dataset_image_cmd.rs ==========
 use crate::dataset_image_cmd;
-use sha2::{Digest,Sha256};
 //======== dataset_image_cmd.rs ==========
 
 use std::collections::HashMap;
@@ -35,9 +34,10 @@ use crate::dataset_backend_type::UiTerminateUploadDatasetRequest;
 
 #[derive(Debug,Clone)]
 pub enum DataSetStatus{
-    Init,
-    ReadyUpload,
-    Uploading(f32),
+    Wait,//wait
+    Init,//wait
+    ReadyUpload,//upload
+    Uploading(f32),//uploading
     Stop,
     AsyncProcessing,
     Success,
@@ -274,6 +274,194 @@ async fn stat_chunk_file(server_endpoint: &str,mode:&str,dataset_id:&str,dataset
 
 }
 
+fn get_dataset_image_cache_path(req:UiStartUploadDatasetRequest) -> PathBuf {
+
+    let dataset_cache_dir = Path::new(req.dataset_cache_dir.as_str());
+
+    dataset_cache_dir.join(req.dataset_id.as_str())
+}
+
+async fn create_dataset_image(req:UiStartUploadDatasetRequest) -> Result<()> {
+
+    let dataset_image_cache_path = get_dataset_image_cache_path(req.clone());
+
+    if ensure_directory(dataset_image_cache_path.as_path()).is_err() {
+        info!("dataset_image_cache_path:{:?} not exist!!!",dataset_image_cache_path);
+        tokio::fs::create_dir_all(dataset_image_cache_path.as_path()).await?;
+    };
+
+    info!("source_image_dir exist:{:?}",dataset_image_cache_path);
+
+    let meta_file_path_buf = dataset_image_cache_path.join("meta");
+
+    let meta_file_path_op = meta_file_path_buf.as_path().as_os_str().to_str();
+    if meta_file_path_op.is_none() {
+        error!("failed to get meta_file_path: none");
+        return Err(anyhow!("failed to get meta_file_path: none"));
+    }
+
+    let source_image_dir_op = dataset_image_cache_path.as_os_str().to_str();
+    if source_image_dir_op.is_none() {
+        error!("failed to get source_image_dir: none");
+        return Err(anyhow!("failed to get source_image_dir: none"));
+    }
+
+    let arg_vec = vec!["","create","-B", meta_file_path_op.unwrap_or_default(),"-D",source_image_dir_op.unwrap_or_default(),req.dataset_source.as_str()];
+    
+    info!("urchin dataset image create command:{:?}",arg_vec);
+
+    let result = execute_dataset_image_cmd(arg_vec).await;
+
+    return result;
+}
+
+async fn rename_dataset_image_cache(req:UiStartUploadDatasetRequest) -> Result<()> {
+
+    let dataset_image_cache_path = get_dataset_image_cache_path(req.clone());
+
+    let dataset_meta_path = dataset_image_cache_path.join("meta");
+
+    let blobs_info_json =  inspect_blob_info(dataset_meta_path.as_path())?;
+
+    let dataset_metas: Vec<DatasetMeta> =  serde_json::from_str(blobs_info_json.as_str())?;
+
+    let dataset_meta = &dataset_metas[0];
+
+    let upload_dataset_meta = dataset_meta.clone();
+
+    let dataset_blob_path = dataset_image_cache_path.join(upload_dataset_meta.digest.as_str());
+
+    let new_dataset_meta_path = dataset_image_cache_path.join(format!("meta_urfs:{}_{}",upload_dataset_meta.digest.as_str(),req.dataset_version_id.as_str()).as_str());
+
+    let new_dataset_blob_path = dataset_image_cache_path.join(format!("blob_urfs:{}_{}",upload_dataset_meta.digest.as_str(),req.dataset_version_id.as_str()).as_str());
+
+    tokio::fs::rename(dataset_meta_path.as_path(),new_dataset_meta_path.as_path()).await?;
+
+    tokio::fs::rename(dataset_blob_path.as_path(),new_dataset_blob_path.as_path()).await?;
+
+    Ok(())
+}
+
+async fn execute_dataset_image_cmd(arg_vec:Vec<&str>) -> Result<()> {
+
+    let build_info = dataset_image_cmd::BTI.to_owned();
+    let mut app = dataset_image_cmd::prepare_cmd_args(dataset_image_cmd::BTI_STRING.as_str());
+    let usage = app.render_usage();
+    
+    let cmd = app.get_matches_from(arg_vec);
+
+    let mut result = Ok(());
+
+    if let Some(matches) = cmd.subcommand_matches("create") {
+        result = dataset_image_cmd::Command::create(matches, &build_info);
+    } else if let Some(matches) = cmd.subcommand_matches("merge") {
+        result = dataset_image_cmd::Command::merge(matches, &build_info);
+    } else if let Some(matches) = cmd.subcommand_matches("check") {
+        result = dataset_image_cmd::Command::check(matches, &build_info);
+    } else if let Some(matches) = cmd.subcommand_matches("inspect") {
+        result = dataset_image_cmd::Command::inspect(matches);
+    } else if let Some(matches) = cmd.subcommand_matches("stat") {
+        result = dataset_image_cmd::Command::stat(matches);
+    } else if let Some(matches) = cmd.subcommand_matches("compact") {
+        result = dataset_image_cmd::Command::compact(matches, &build_info);
+    } else if let Some(matches) = cmd.subcommand_matches("unpack") {
+        result = dataset_image_cmd::Command::unpack(matches);
+    } else {
+        error!("please see the urchin-image command usage {}", usage);
+    }
+
+    if let Err(e) = result {
+        error!("failed to execute urchin dataset image command, {:?}", e);
+        return Err(anyhow!("failed to execute urchin dataset image command, {:?}", e));
+    }
+
+    Ok(())
+}
+
+
+async fn start_dataset_uploader(all_dataset_chunk_sema: Arc<Semaphore>, dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,
+                                uploader_shutdown_cmd_suber: broadcast::Sender<()>,uploader_shutdown_cmd_rx:broadcast::Receiver<()>,
+                                req:UiStartUploadDatasetRequest) -> Result<()> {
+       
+    let dataset_image_cache_path = get_dataset_image_cache_path(req.clone());
+
+    ensure_directory(dataset_image_cache_path.as_path())?;
+
+    let dataset_meta_path = dataset_image_cache_path.join("meta");
+
+    debug!("dataset_source:{:?},dataset_image_cache_path:{:?}, dataset_meta_path: {:?}",req.dataset_source,dataset_image_cache_path, dataset_meta_path);
+
+    let blobs_info_json =  inspect_blob_info(dataset_meta_path.as_path())?;
+
+    let dataset_metas: Vec<DatasetMeta> =  serde_json::from_str(blobs_info_json.as_str())?;
+
+    let dataset_meta = &dataset_metas[0];
+
+    let upload_dataset_meta = dataset_meta.clone();
+
+    let dataset_blob_path = dataset_image_cache_path.join(upload_dataset_meta.digest.as_str());
+
+    let upload_server_endpoint = req.server_endpoint.clone();
+
+    let dataset_id = req.dataset_id.clone();
+    let dataset_version_id = req.dataset_version_id.clone();
+
+    //Concurent upload futures tree
+    let mut uploader: DatasetUploader = DatasetUploader::new(dataset_id,
+                                                                dataset_version_id,
+                                                                dataset_meta_path,
+                                                                upload_dataset_meta,
+                                                                dataset_blob_path,
+                                                                upload_server_endpoint,
+                                                                dataset_status_sender,
+                                                uploader_shutdown_cmd_suber,
+                                                    uploader_shutdown_cmd_rx,
+                                                                all_dataset_chunk_sema);
+
+    //ToDo: process upload result Error!!!
+    uploader.upload().await?;
+
+    Ok(())
+}
+
+
+async fn start_upload(all_dataset_sema: Arc<Semaphore>, dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,
+                      uploader_shutdown_cmd_suber: broadcast::Sender<()>,uploader_shutdown_cmd_rx:broadcast::Receiver<()>,
+                      req:UiStartUploadDatasetRequest) -> Result<()> {
+    let mut result;
+                                            
+    let mut dataset_status;
+
+    let _try_create_dataset_image_task_permited_by_all_dataset = all_dataset_sema.acquire().await?;
+
+    dataset_status = DataSetStatus::Init;
+    dataset_status_sender.send((req.dataset_id.clone(),req.dataset_version_id.clone(),dataset_status)).await?;
+
+    result = create_dataset_image(req.clone()).await;
+
+    if result.is_ok() {
+        dataset_status = DataSetStatus::ReadyUpload;
+        dataset_status_sender.send((req.dataset_id.clone(),req.dataset_version_id.clone(),dataset_status)).await?;
+        
+        result = start_dataset_uploader(all_dataset_sema.clone(), dataset_status_sender.clone(),uploader_shutdown_cmd_suber,uploader_shutdown_cmd_rx,req.clone()).await;
+        
+        if result.is_err() {
+            dataset_status = DataSetStatus::Failed;
+            dataset_status_sender.send((req.dataset_id.clone(),req.dataset_version_id.clone(),dataset_status)).await?;
+        }
+    }else{
+        dataset_status = DataSetStatus::Failed;
+        dataset_status_sender.send((req.dataset_id.clone(),req.dataset_version_id.clone(),dataset_status)).await?;
+    }
+
+    result = rename_dataset_image_cache(req.clone()).await;
+    if result.is_err() {
+        warn!("[start_upload]: req {:?} , start_upload finish. rename_dataset_image_cache result: {:?},",req,result);
+    }
+
+    Ok(())
+}
+
 #[derive(Debug,PartialEq,Serialize, Deserialize)]
 enum UrchinStatusCode{
     Succeed,
@@ -310,7 +498,7 @@ struct StatFileResponse {
 //refer loop & TCP::Listener
 pub struct DatasetManager {
     upload_dataset_history: HashMap<String,DataSetStatus>,
-    all_dataset_chunk_sema :Arc<Semaphore>,
+    all_dataset_sema :Arc<Semaphore>,
     dataset_status_sender: mpsc::Sender<(String,String,DataSetStatus)>,
     dataset_status_collector: mpsc::Receiver<(String,String,DataSetStatus)>,
     ui_cmd_collector: mpsc::Receiver<(String,String,oneshot::Sender<UiResponse>)>,
@@ -326,7 +514,7 @@ impl DatasetManager {
     
         Self {
             upload_dataset_history: HashMap::new(),
-            all_dataset_chunk_sema: Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY)),
+            all_dataset_sema: Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY)),
             dataset_status_sender,
             dataset_status_collector,
             ui_cmd_collector,
@@ -354,6 +542,7 @@ impl DatasetManager {
                     
                     match cmd.as_str() {
                         "start_upload" => {
+
                             debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
                             
                             let req_json_result =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json);
@@ -361,41 +550,32 @@ impl DatasetManager {
                             match req_json_result {
                                 std::result::Result::Ok(req) => {
                                     
-                                    let mut result;
+                                    let (uploader_shutdown_cmd_sx,uploader_shutdown_cmd_rx) = broadcast::channel(1);
 
-                                    result = self.create_dataset_image(req.clone()).await;
+                                    let uploader_shutdown_cmd_suber = uploader_shutdown_cmd_sx.clone();
+                                    // after Concurent create Dataset Uploader, should add meta to DatasetManager
+                                    self.set_dataset_uploader_shutdown_cmd_sender(req.dataset_id.clone(), req.dataset_version_id.clone(), uploader_shutdown_cmd_sx);
+                                    self.set_dataset_status(req.dataset_id.as_str(), req.dataset_version_id.as_str(), DataSetStatus::Wait);
 
-                                    if result.is_ok() {
-                                        result = self.start_dataset_uploader(req.clone()).await;
-                                    }else{
-                                        self.set_dataset_status(req.dataset_id.as_str(),req.dataset_version_id.as_str(), DataSetStatus::Failed);
+                                    let dataset_status_sender = self.dataset_status_sender.clone();
+                                    let all_dataset_sema = self.all_dataset_sema.clone();
+
+                                    //Concurent upload futures tree
+                                    tokio::spawn(async move {
+                                        //cause handling error nums >2 is trouble in one fn scope, we should define a new fn like start_upload fn
+                                        let result = start_upload(all_dataset_sema, dataset_status_sender,uploader_shutdown_cmd_suber,uploader_shutdown_cmd_rx,req.clone()).await;
+
+                                        debug!("[DatasetManager]: start_upload req:{:?}, result: {:?},",req,result);
+                                    });
+
+                                    let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
+
+                                    debug!("[DatasetManager]: ui_cmd_collector cmd: {:?},resp:{:?}",cmd,resp);
+
+                                    if resp_sender.send(resp).is_err(){
+                                        //Do not need process next step, here is Err-Topest-Process Layer!
+                                        error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                     }
-
-                                    debug!("[DatasetManager]: ui_cmd_collector cmd: {}, result: {:?},",cmd,result);
-
-                                    match result {
-                                        std::result::Result::Ok(_) => {
-
-                                            let resp = UiResponse{status_code: 0, status_msg:"".to_string()};
-
-                                            if resp_sender.send(resp).is_err(){
-                                                    //Do not need process next step, here is Err-Topest-Process Layer!
-                                                    error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
-                                            }
-                                        },
-                                        std::result::Result::Err(e)=> {
-
-                                            let resp = UiResponse{status_code: -1, status_msg: e.to_string()};
-
-                                            if resp_sender.send(resp).is_err(){
-                                                    //Do not need process next step, here is Err-Topest-Process Layer!
-                                                    error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
-                                            }
-                                        }
-                                    }
-
-                                    //result = self.delete_dataset_image_cache(req.clone()).await;
-                                    //debug!("[DatasetManager]: ui_cmd_collector cmd: {}, delete_dataset_image_cache, result: {:?},",cmd,result);
                                 },
                                 std::result::Result::Err(e)=> {
 
@@ -407,7 +587,6 @@ impl DatasetManager {
                                     }
                                 }
                             }
-                            
                         },
                         "stop_upload" => {
                             debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
@@ -540,161 +719,6 @@ impl DatasetManager {
        debug!("get_history:{:?}",self.upload_dataset_history); 
     }
 
-    fn sha256_hash(&self,data: &[u8]) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        format!("{:x}", hasher.finalize())
-    }
-
-    fn get_dataset_image_cache_path(&self,dataset_cache_dir: &str,dataset_source: &str) -> PathBuf {
-        let source_hash: String = self.sha256_hash(dataset_source.as_bytes());
-
-        let dataset_cache_dir = Path::new(dataset_cache_dir);
-
-        dataset_cache_dir.join(source_hash)
-    }
-
-    async fn create_dataset_image(&mut self, req:UiStartUploadDatasetRequest) -> Result<()> {
-
-        self.set_dataset_status(req.dataset_id.as_str(),req.dataset_version_id.as_str(), DataSetStatus::Init);
-
-        let dataset_image_cache_path = self.get_dataset_image_cache_path(req.dataset_cache_dir.as_str(),req.dataset_source.as_str());
-
-        if ensure_directory(dataset_image_cache_path.as_path()).is_err() {
-            info!("dataset_image_cache_path:{:?} not exist!!!",dataset_image_cache_path);
-            tokio::fs::create_dir_all(dataset_image_cache_path.as_path()).await?;
-        };
-
-        info!("source_image_dir exist:{:?}",dataset_image_cache_path);
-
-        let meta_file_path_buf = dataset_image_cache_path.join("meta");
-
-        let meta_file_path_op = meta_file_path_buf.as_path().as_os_str().to_str();
-        if meta_file_path_op.is_none() {
-            error!("failed to get meta_file_path: none");
-            return Err(anyhow!("failed to get meta_file_path: none"));
-        }
-
-        let source_image_dir_op = dataset_image_cache_path.as_os_str().to_str();
-        if source_image_dir_op.is_none() {
-            error!("failed to get source_image_dir: none");
-            return Err(anyhow!("failed to get source_image_dir: none"));
-        }
-
-        let arg_vec = vec!["","create","-B", meta_file_path_op.unwrap_or_default(),"-D",source_image_dir_op.unwrap_or_default(),req.dataset_source.as_str()];
-        
-        info!("urchin dataset image create command:{:?}",arg_vec);
-
-        let result = self.execute_dataset_image_cmd(arg_vec).await;
-
-        return result;
-    }
-
-    async fn delete_dataset_image_cache(&mut self, req:UiStartUploadDatasetRequest) -> Result<()> {
-
-        let dataset_image_cache_path = self.get_dataset_image_cache_path(req.dataset_cache_dir.as_str(),req.dataset_source.as_str());
-
-        tokio::fs::remove_dir_all(dataset_image_cache_path).await?;
-        Ok(())
-    }
-
-    async fn execute_dataset_image_cmd(&mut self, arg_vec:Vec<&str>) -> Result<()> {
-
-        let build_info = dataset_image_cmd::BTI.to_owned();
-        let mut app = dataset_image_cmd::prepare_cmd_args(dataset_image_cmd::BTI_STRING.as_str());
-        let usage = app.render_usage();
-        
-        let cmd = app.get_matches_from(arg_vec);
-
-        let mut result = Ok(());
-
-        if let Some(matches) = cmd.subcommand_matches("create") {
-            result = dataset_image_cmd::Command::create(matches, &build_info);
-        } else if let Some(matches) = cmd.subcommand_matches("merge") {
-            result = dataset_image_cmd::Command::merge(matches, &build_info);
-        } else if let Some(matches) = cmd.subcommand_matches("check") {
-            result = dataset_image_cmd::Command::check(matches, &build_info);
-        } else if let Some(matches) = cmd.subcommand_matches("inspect") {
-            result = dataset_image_cmd::Command::inspect(matches);
-        } else if let Some(matches) = cmd.subcommand_matches("stat") {
-            result = dataset_image_cmd::Command::stat(matches);
-        } else if let Some(matches) = cmd.subcommand_matches("compact") {
-            result = dataset_image_cmd::Command::compact(matches, &build_info);
-        } else if let Some(matches) = cmd.subcommand_matches("unpack") {
-            result = dataset_image_cmd::Command::unpack(matches);
-        } else {
-            error!("please see the urchin-image command usage {}", usage);
-        }
-
-        if let Err(e) = result {
-            error!("failed to execute urchin dataset image command, {:?}", e);
-            return Err(anyhow!("failed to execute urchin dataset image command, {:?}", e));
-        }
-
-        Ok(())
-    }
-
-
-    async fn start_dataset_uploader(&mut self, req:UiStartUploadDatasetRequest) -> Result<()> {
-       
-        let dataset_image_cache_path = self.get_dataset_image_cache_path(req.dataset_cache_dir.as_str(),req.dataset_source.as_str());
-
-        ensure_directory(dataset_image_cache_path.as_path())?;
-
-        let dataset_meta_path = dataset_image_cache_path.join("meta");
-
-        debug!("dataset_source:{:?},dataset_image_cache_path:{:?}, dataset_meta_path: {:?}",req.dataset_source,dataset_image_cache_path, dataset_meta_path);
-
-        let blobs_info_json =  inspect_blob_info(dataset_meta_path.as_path())?;
-
-        let dataset_metas: Vec<DatasetMeta> =  serde_json::from_str(blobs_info_json.as_str())?;
-
-        let dataset_meta = &dataset_metas[0];
-
-        let upload_dataset_meta = dataset_meta.clone();
-
-        let dataset_blob_path = dataset_image_cache_path.join(upload_dataset_meta.digest.as_str());
-
-        let upload_server_endpoint = req.server_endpoint.clone();
-
-        let (uploader_shutdown_cmd_sx,uploader_shutdown_cmd_rx) = broadcast::channel(1);
-        
-        let uploader_shutdown_cmd_suber = uploader_shutdown_cmd_sx.clone();
-
-        let dataset_status_sender = self.dataset_status_sender.clone();
-
-        let dataset_id = req.dataset_id.clone();
-        let dataset_version_id = req.dataset_version_id.clone();
-
-        let all_dataset_chunk_sema = self.all_dataset_chunk_sema.clone();
-
-        //Concurent upload futures tree
-        tokio::spawn(async move {
-            
-            let mut uploader = DatasetUploader::new(dataset_id,
-                                                                     dataset_version_id,
-                                                                     dataset_meta_path,
-                                                                     upload_dataset_meta,
-                                                                     dataset_blob_path,
-                                                                     upload_server_endpoint,
-                                                                     dataset_status_sender,
-                                                      uploader_shutdown_cmd_suber,
-                                                         uploader_shutdown_cmd_rx,
-                                                                     all_dataset_chunk_sema);
-
-            //ToDo: process upload result Error!!!
-            uploader.upload().await?;
-
-            Ok(())
-        });
-
-        // after Concurent create DatasetUploader, should add meta to DatasetManager
-        self.set_dataset_uploader_shutdown_cmd_sender(req.dataset_id.clone(), req.dataset_version_id.clone(), uploader_shutdown_cmd_sx);
-        self.set_dataset_status(req.dataset_id.as_str(),req.dataset_version_id.as_str(), DataSetStatus::ReadyUpload);
-
-        Ok(())
-
-    }
 
     async fn stop_dataset_uploader(&self, req_json:String) -> Result<()> {
 
@@ -1096,20 +1120,20 @@ impl DatasetChunksManager {
     fn new(dataset_id:String,
            dataset_version_id:String,
            dataset_meta:DatasetMeta,
-           all_dataset_sema:Arc<Semaphore>,
+           all_dataset_chunk_sema:Arc<Semaphore>,
            endpoint:String,
            file_path:PathBuf,
            chunks_pusher:mpsc::Sender<DatasetChunk>,
            chunk_result_sender:mpsc::Sender<DatasetChunkResult>,
            shutdown_cmd_suber:broadcast::Sender<()>) -> Self {
 
-        let one_dataset_sema = Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY+1));
+        let one_dataset_chunk_sema = Arc::new(Semaphore::new(CHUNK_UPLOADER_MAX_CONCURRENCY+1));
         
         Self {
             dataset_id,
             dataset_version_id,
-            all_dataset_chunk_sema: all_dataset_sema,
-            one_dataset_chunk_sema: one_dataset_sema,
+            all_dataset_chunk_sema,
+            one_dataset_chunk_sema,
             upload_endpoint: endpoint,
             upload_file_path: file_path,
             upload_dataset: dataset_meta,
@@ -1352,12 +1376,12 @@ impl DatasetChunksManager {
 
     pub async fn create_upload_chunk_task(data_chunk:DatasetChunk) -> Result<DatasetChunkResult> {
 
-        let _run_permit_by_one_dataset = data_chunk.one_dataset_sema.acquire().await?;
+        let _run_permit_by_one_dataset = data_chunk.one_dataset_chunk_sema.acquire().await?;
 
         debug!("[UploadChunkTask]: upload chunk permit by one_dataset! dataset_id:{},dataset_version_id:{}",
         data_chunk.dataset_id,data_chunk.dataset_version_id);
 
-        let _run_permit_by_all_dataset = data_chunk.all_dataset_sema.acquire().await?;
+        let _run_permit_by_all_dataset = data_chunk.all_dataset_chunk_sema.acquire().await?;
 
         debug!("[UploadChunkTask]: upload chunk permit by all_dataset! dataset_id:{},dataset_version_id:{}",
         data_chunk.dataset_id,data_chunk.dataset_version_id);
@@ -1483,9 +1507,9 @@ struct DatasetChunk{
     upload_file_path: PathBuf,
     upload_result_sender: mpsc::Sender<DatasetChunkResult>,
     //all dataset contain many chunks, concurrency from all dataset should be limited
-    all_dataset_sema: Arc<Semaphore>,
+    all_dataset_chunk_sema: Arc<Semaphore>,
     //one dataset also contain many chunks, concurrency form one dataset also should be limited
-    one_dataset_sema: Arc<Semaphore>,
+    one_dataset_chunk_sema: Arc<Semaphore>,
 }
 
 impl DatasetChunk {
@@ -1496,8 +1520,8 @@ impl DatasetChunk {
            start:u64,
            endpoint:String,
            file_path: PathBuf,
-           sema_permit_by_all_dataset:Arc<Semaphore>,
-           sema_permit_by_one_dataset:Arc<Semaphore>,
+           all_dataset_chunk_sema:Arc<Semaphore>,
+           one_dataset_chunk_sema:Arc<Semaphore>,
            result_sender:mpsc::Sender<DatasetChunkResult>) -> Self {
 
         Self {
@@ -1509,8 +1533,8 @@ impl DatasetChunk {
             upload_endpoint: endpoint,
             upload_file_path: file_path,
             upload_result_sender: result_sender,
-            all_dataset_sema: sema_permit_by_all_dataset,
-            one_dataset_sema: sema_permit_by_one_dataset
+            all_dataset_chunk_sema,
+            one_dataset_chunk_sema,
         }
     }
 }
