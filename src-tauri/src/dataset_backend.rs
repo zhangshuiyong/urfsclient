@@ -35,7 +35,7 @@ use crate::dataset_backend_type::UiTerminateUploadDatasetRequest;
 #[derive(Debug,Clone)]
 pub enum DataSetStatus{
     Wait,//wait
-    Init,//wait
+    Init,//init dataset image
     ReadyUpload,//upload
     Uploading(f32),//uploading
     Stop,
