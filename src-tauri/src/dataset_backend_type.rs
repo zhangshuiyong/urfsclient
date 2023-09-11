@@ -30,6 +30,7 @@ impl serde::Serialize for UiError {
 pub struct UiResponse{
     pub status_code: i32,
     pub status_msg: String,
+    pub payload_json: String,
 }
 
 #[derive(Clone,Serialize, Deserialize,Debug)]

@@ -94,7 +94,7 @@ async fn get_history(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,St
 
     let (sx,rx) = oneshot::channel();
 
-    cmd_sender.send(("get_history".to_string(),"req".to_string(),sx)).await?;
+    cmd_sender.send(("get_history".to_string(),req,sx)).await?;
 
     let resp = rx.await?;
 
