@@ -73,8 +73,9 @@ async function terminate_upload() {
 async function get_history() {
     try{
         info("[ui] click get_history btn")
-        await invoke("get_history", {req: JSON.stringify({ req: "{}" })})
+        let history = await invoke("get_history", {req: JSON.stringify({ req: "{}" })})
         message.success("获取文件上传历史成功");
+        info("[ui] get_history result:"+history);
     }catch(err: any){
         message.error("终止上传错误：", err);
     }
