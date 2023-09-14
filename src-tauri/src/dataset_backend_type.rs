@@ -42,7 +42,7 @@ pub struct UiStartUploadDatasetRequest{
     pub server_endpoint: String,
 }
 
-#[derive(Clone,Serialize, Deserialize,Debug)]
+#[derive(Serialize, Deserialize,Debug)]
 pub struct UiStopUploadDatasetRequest{
     pub dataset_id: String,
     pub dataset_version_id: String,

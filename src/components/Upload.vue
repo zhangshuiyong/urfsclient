@@ -31,7 +31,7 @@ async function star_upload(source:string) {
     try{
         await invoke("start_upload", { req :JSON.stringify({
             dataset_id: 'xxx',
-            dataset_version_id: source.substring(source.lastIndexOf('/')+1),
+            dataset_version_id: 'default',
             dataset_cache_dir: appCacheDirPath,
             dataset_source: source,
             server_endpoint: 'http://0.0.0.0:65004'
