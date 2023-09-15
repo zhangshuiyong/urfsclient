@@ -37,10 +37,12 @@ use tokio::sync::{mpsc,oneshot};
 use crate::dataset_backend::DatasetManager;
 use crate::dataset_backend_type::UiError;
 use crate::dataset_backend_type::UiResponse;
+use crate::dataset_backend::HISTORY_TASK_DB_PATH;
 
 #[tauri::command]
 async fn start_upload(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,String,oneshot::Sender<UiResponse>)>>,req: String) -> Result<String,UiError> {
-    
+    info!("[ui::cmd start_upload] req: {:?}", req);
+
     let cmd_sender = dataset_cmd_sender.inner().clone();
 
     let (sx,rx) = oneshot::channel();
@@ -51,11 +53,15 @@ async fn start_upload(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,S
 
     let resp_json = serde_json::to_string(&resp)?;
 
+    info!("[ui::cmd start_upload] resp: {:?}", resp_json);
+
     Ok(resp_json)
 }
 
 #[tauri::command]
 async fn stop_upload(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,String,oneshot::Sender<UiResponse>)>>,req: String) -> Result<String,UiError> {
+    info!("[ui::cmd stop_upload] req: {:?}", req);
+
     let cmd_sender = dataset_cmd_sender.inner().clone();
 
     let (sx,rx) = oneshot::channel();
@@ -66,29 +72,32 @@ async fn stop_upload(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,St
 
     let resp_json = serde_json::to_string(&resp)?;
 
+    info!("[ui::cmd stop_upload] resp: {:?}", resp_json);
+
     Ok(resp_json)
 }
 
 #[tauri::command]
 async fn terminate_upload(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,String,oneshot::Sender<UiResponse>)>>,req: String) -> Result<String,UiError> {
-    info!("terminate_upload begin: {:?}", req);
+    info!("[ui::cmd terminate_upload] req: {:?}", req);
+
     let cmd_sender = dataset_cmd_sender.inner().clone();
 
     let (sx,rx) = oneshot::channel();
 
-    cmd_sender.send(("terminate_upload".to_string(),req,sx)).await?;
+    cmd_sender.send(("terminate_upload".to_string(), req,sx)).await?;
 
     let resp = rx.await?;
 
     let resp_json = serde_json::to_string(&resp)?;
 
-    info!("terminate_upload end: {:?}", resp_json);
+    info!("[ui::cmd terminate_upload] resp: {:?}", resp_json);
     Ok(resp_json)
 }
 
 #[tauri::command]
 async fn get_history(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,String,oneshot::Sender<UiResponse>)>>,req:String) -> Result<String,UiError> {
-    warn!("get dataset_status history: {:?}", req);
+    warn!("[ui::cmd get_history] req: {:?}", req);
     
     let cmd_sender = dataset_cmd_sender.inner().clone();
 
@@ -99,6 +108,8 @@ async fn get_history(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,St
     let resp = rx.await?;
 
     let resp_json = serde_json::to_string(&resp)?;
+
+    warn!("[ui::cmd get_history] resp: {:?}", resp_json);
 
     Ok(resp_json)
 }
@@ -129,7 +140,27 @@ async fn main() {
         .manage(ex_cmd_sender)
         .invoke_handler(tauri::generate_handler![start_upload,stop_upload,terminate_upload,
                                                  get_history])
+        .setup(|app| {
+
+            let app_cache_dir_path_buf = app.path_resolver().app_cache_dir().expect("[APP]: can not get app_cache_dir");
+            let app_cache_dir_path = app_cache_dir_path_buf.as_path();
+            let history_task_db_path_buf = app_cache_dir_path.join(HISTORY_TASK_DB_PATH);
+
+            _ = sled::open(history_task_db_path_buf)?;
+
+            info!("[APP]: ARCH = {}", std::env::consts::ARCH);
+            info!("[APP]: FAMILY = {}", std::env::consts::FAMILY);
+            info!("[APP]: OS = {}", std::env::consts::OS);
+
+            info!("[APP]: env URFS_APP_CACHE_DIR is ok:{}", std::env::var("URFS_APP_CACHE_DIR").is_ok());
+
+            std::env::set_var("URFS_APP_CACHE_DIR", app_cache_dir_path);
+
+            info!("[APP]: env URFS_APP_CACHE_DIR is ok:{}", std::env::var("URFS_APP_CACHE_DIR").is_ok());
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("[APP]: error while running tauri application");
 }
 

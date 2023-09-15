@@ -4,7 +4,6 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { open } from '@tauri-apps/api/dialog';
 import { info,error } from "tauri-plugin-log-api";
 import { message } from 'ant-design-vue';
-import { appCacheDir } from '@tauri-apps/api/path';
 import { FileOutlined,FolderOutlined } from '@ant-design/icons-vue';
 
 const uploadItemList:any = reactive([]);
@@ -24,20 +23,20 @@ async function select_upload_fold() {
 
 async function star_upload(source:string) {
 
-    const appCacheDirPath = await appCacheDir();
-
-    info(`[ui] star_upload source path:${source}, appCacheDirPath:${appCacheDirPath}`);
+    info(`[ui] star_upload source path:${source}`);
 
     try{
-        await invoke("start_upload", { req :JSON.stringify({
+       var resp = await invoke("start_upload", { req :JSON.stringify({
             dataset_id: 'xxx',
             dataset_version_id: source.substring(source.lastIndexOf('/')+1),
-            dataset_cache_dir: appCacheDirPath,
             dataset_source: source,
             server_endpoint: 'http://0.0.0.0:65004'
-        })})
+        })});
 
-        message.success('正在上传');
+        message.success('上传请求已发送');
+
+        info(`上传请求返回: ${resp}`);
+
     }catch(err: any){
         message.error('上传出错：',err);
         error(`上传出错: ${err}`);
@@ -46,11 +45,14 @@ async function star_upload(source:string) {
 
 async function stop_upload() {
     try{
-        await invoke("stop_upload", { req :JSON.stringify({
+      var resp = await invoke("stop_upload", { req :JSON.stringify({
             dataset_id: 'xxx',
             dataset_version_id: 'default',
         })})
-        message.success("暂停上传成功");
+        message.success("暂停上传请求已发送");
+
+        info(`暂停上传请求返回: ${resp}`);
+
     }catch(err: any){
         message.error("暂停上传出错：", err);
         error(`暂停上传出错: ${err}`);
@@ -59,11 +61,14 @@ async function stop_upload() {
 
 async function terminate_upload() {
     try{
-        await invoke("terminate_upload", { req :JSON.stringify({
+       var resp = await invoke("terminate_upload", { req :JSON.stringify({
             dataset_id: 'xxx',
             dataset_version_id: 'default',
           })})
-        message.success("终止上传成功");
+        message.success("终止上传已发送");
+
+        info(`终止上传请求返回: ${resp}`);
+
     }catch(err: any){
         message.error("终止上传出错：", err);
         error(`终止上传出错: ${err}`);
@@ -77,7 +82,8 @@ async function get_history() {
         message.success("获取文件上传历史成功");
         info("[ui] get_history result:"+history);
     }catch(err: any){
-        message.error("终止上传错误：", err);
+        message.error("获取文件上传历史错误：", err);
+        error(`获取文件上传历史出错: ${err}`);
     }
 }
 
