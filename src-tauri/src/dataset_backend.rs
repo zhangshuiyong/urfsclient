@@ -24,6 +24,7 @@ pub const HTTP_CONN_RECYCLE_TIMEOUT: u64 = 60;
 pub const CHUNK_UPLOADER_MAX_CONCURRENCY: usize = 4;
 pub const HISTORY_TASK_DB_PATH: &str = "./upload_history_data.db";
 pub const HISTORY_TASK_KEY_PREFIX: &str = "urfs";
+pub const HISTORY_TASK_LIST_MAX_LENGTH: usize = 300;
 
 use std::fmt;
 use nydus_utils::digest;
@@ -523,7 +524,7 @@ fn delete_history_task_to_db(dataset_id:&str,dataset_version_id:&str) -> Result<
     Ok(())
 }
 
-fn get_history_task_list_from_db() -> Result<String> {
+fn get_history_task_list_from_db(pre_len: usize) -> Result<String> {
     let history_task_db_path = get_history_task_db_path()?;
 
     let dataset_history_task_db: sled::Db = sled::open(history_task_db_path)?;
@@ -556,6 +557,10 @@ fn get_history_task_list_from_db() -> Result<String> {
             break;
         }
     }
+
+    history_tasks.sort_by(|a, b| b.create_timestamp.cmp(&a.create_timestamp));
+    //get pre-len tasks
+    history_tasks.truncate(pre_len);    
 
     info!("[get_history_task_list_from_db] task list:{:?} ",history_tasks);
 
@@ -867,7 +872,7 @@ impl DatasetManager {
                                             }
                                         },
                                         std::result::Result::Err(e)=> {
-                                            
+
                                             error!("[DatasetManager]: terminate_upload err:{:?}",e);
 
                                             let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
@@ -893,7 +898,7 @@ impl DatasetManager {
                         "get_history" => {
                             debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
 
-                            let history_task_list_json_result = get_history_task_list_from_db();
+                            let history_task_list_json_result = get_history_task_list_from_db(HISTORY_TASK_LIST_MAX_LENGTH);
 
                             match history_task_list_json_result {
                                 std::result::Result::Ok(history_task_list_json) => {
