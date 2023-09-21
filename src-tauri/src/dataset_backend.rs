@@ -32,6 +32,7 @@ use nydus_utils::digest;
 use crate::dataset_backend_type::UiResponse;
 use crate::dataset_backend_type::UiStartUploadDatasetRequest;
 use crate::dataset_backend_type::UiStopUploadDatasetRequest;
+use crate::dataset_backend_type::UiDeleteDatasetTaskRequest;
 
 #[derive(Debug,Clone,Serialize, Deserialize)]
 pub enum DataSetStatus{
@@ -757,7 +758,7 @@ impl DatasetManager {
                                     let new_hist_task_result = new_history_task_to_db(req.dataset_id.as_str(), req.dataset_version_id.as_str(), req.dataset_source.as_str());
 
                                     if new_hist_task_result.is_err() {
-                                        error!("[DatasetManager]: start_upload new_history_task_to_db failed, dataset_id:{},dataset_version_id:{},err:{:?}",
+                                        error!("[DatasetManager]:[start_upload] new_history_task_to_db failed, dataset_id:{},dataset_version_id:{},err:{:?}",
                                         req.dataset_id,req.dataset_version_id,new_hist_task_result);
                                     }else{
                                         let dataset_status_sender = self.dataset_status_sender.clone();
@@ -768,7 +769,7 @@ impl DatasetManager {
                                             //cause handling error nums >2 is trouble in one fn scope, we should define a new fn like start_upload fn
                                             let result = start_upload(all_dataset_sema, dataset_status_sender,uploader_shutdown_cmd_suber,uploader_shutdown_cmd_rx,req.clone()).await;
 
-                                            debug!("[DatasetManager]: start_upload req:{:?}, result: {:?},",req,result);
+                                            debug!("[DatasetManager]:[start_upload] req:{:?}, result: {:?},",req,result);
                                         });
 
                                         let resp = UiResponse{status_code: 0, status_msg:"".to_string(),payload_json:"".to_string()};
@@ -777,19 +778,19 @@ impl DatasetManager {
 
                                         if resp_sender.send(resp).is_err(){
                                             //Do not need process next step, here is Err-Topest-Process Layer!
-                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                            error!("[DatasetManager]:[start_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                         }
                                     }
                                 },
                                 std::result::Result::Err(e)=> {
 
-                                    error!("[DatasetManager]: start_upload err:{:?}",e);
+                                    error!("[DatasetManager]:[start_upload] err:{:?}",e);
 
                                     let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
 
                                     if resp_sender.send(resp).is_err(){
                                             //Do not need process next step, here is Err-Topest-Process Layer!
-                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                            error!("[DatasetManager]:[start_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                     }
                                 }
                             }
@@ -807,30 +808,30 @@ impl DatasetManager {
 
                                             if resp_sender.send(resp).is_err(){
                                                     //Do not need process next step, here is Err-Topest-Process Layer!
-                                                    error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                                    error!("[DatasetManager]:[stop_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                             }
                                         },
                                         std::result::Result::Err(e)=> {
 
-                                            error!("[DatasetManager]: stop_upload err:{:?}",e);
+                                            error!("[DatasetManager]:[stop_upload] err:{:?}",e);
 
                                             let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
 
                                             if resp_sender.send(resp).is_err(){
                                                     //Do not need process next step, here is Err-Topest-Process Layer!
-                                                    error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                                    error!("[DatasetManager]:[stop_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                             }
                                         }
                                     }
                                },
                                std::result::Result::Err(e)=> {
 
-                                  error!("[DatasetManager]: stop_upload err:{:?}",e);
+                                  error!("[DatasetManager]:[stop_upload] err:{:?}",e);
 
                                   let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
                                   if resp_sender.send(resp).is_err(){
                                        //Do not need process next step, here is Err-Topest-Process Layer!
-                                       error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                       error!("[DatasetManager]:[stop_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                   }
                                }
                             }
@@ -855,48 +856,48 @@ impl DatasetManager {
 
                                                     if resp_sender.send(resp).is_err(){
                                                             //Do not need process next step, here is Err-Topest-Process Layer!
-                                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                                            error!("[DatasetManager]:[terminate_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                                     }
                                                 },
                                                 std::result::Result::Err(e)=> {
 
-                                                    error!("[DatasetManager]: terminate_upload err:{:?}",e);
+                                                    error!("[DatasetManager]:[terminate_upload] err:{:?}",e);
 
                                                     let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
 
                                                     if resp_sender.send(resp).is_err(){
                                                             //Do not need process next step, here is Err-Topest-Process Layer!
-                                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                                            error!("[DatasetManager]:[terminate_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                                     }
                                                 }
                                             }
                                         },
                                         std::result::Result::Err(e)=> {
 
-                                            error!("[DatasetManager]: terminate_upload err:{:?}",e);
+                                            error!("[DatasetManager]:[terminate_upload] err:{:?}",e);
 
                                             let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
                                             if resp_sender.send(resp).is_err(){
                                                     //Do not need process next step, here is Err-Topest-Process Layer!
-                                                    error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                                    error!("[DatasetManager]:[terminate_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                             }
                                         }
                                     }
                                 },
                                 std::result::Result::Err(e)=> {
-                                   error!("[DatasetManager]: terminate_upload err:{:?}",e);
+                                   error!("[DatasetManager]:[terminate_upload] err:{:?}",e);
 
                                    let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
                                    if resp_sender.send(resp).is_err(){
                                         //Do not need process next step, here is Err-Topest-Process Layer!
-                                        error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                        error!("[DatasetManager]:[terminate_upload] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                    }
                                 }
                             }
 
                         },
                         "get_history" => {
-                            debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
+                            debug!("[DatasetManager]:[get_history] ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
 
                             let history_task_list_json_result = get_history_task_list_from_db(HISTORY_TASK_LIST_MAX_LENGTH);
 
@@ -907,19 +908,62 @@ impl DatasetManager {
 
                                     if resp_sender.send(resp).is_err() {
                                         //Do not need process next step, here is Err-Topest-Process Layer!
-                                        error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                        error!("[DatasetManager]:[get_history] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                     }
                                 },
                                 std::result::Result::Err(e)=> {
 
-                                    error!("[DatasetManager]: get_history err:{:?}",e);
+                                    error!("[DatasetManager]:[get_history] err:{:?}",e);
 
                                     let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
 
                                     if resp_sender.send(resp).is_err(){
                                             //Do not need process next step, here is Err-Topest-Process Layer!
-                                            error!("[DatasetManager]: can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                            error!("[DatasetManager]:[get_history] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
                                     }
+                                }
+                            }
+                        },
+                        "delete_history_task" => {
+                            debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
+
+                            let req_json_result =  serde_json::from_str::<UiDeleteDatasetTaskRequest>(&req_json);
+                            match req_json_result {
+                                std::result::Result::Ok(req) => {
+
+                                    let delete_result = delete_history_task_to_db(req.dataset_id.as_str(),req.dataset_version_id.as_str());
+
+                                    match delete_result {
+                                        std::result::Result::Ok(_) => {
+
+                                            let resp = UiResponse{status_code: 0, status_msg:"".to_string(),payload_json:"".to_string()};
+
+                                            if resp_sender.send(resp).is_err(){
+                                                    //Do not need process next step, here is Err-Topest-Process Layer!
+                                                    error!("[DatasetManager]:[delete_history_task] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                            }
+                                        },
+                                        std::result::Result::Err(e)=> {
+
+                                            error!("[DatasetManager]:[delete_history_task] err:{:?}",e);
+
+                                            let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
+
+                                            if resp_sender.send(resp).is_err(){
+                                                    //Do not need process next step, here is Err-Topest-Process Layer!
+                                                    error!("[DatasetManager]:[delete_history_task] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                            }
+                                        }
+                                    }
+                                },
+                                std::result::Result::Err(e)=> {
+                                   error!("[DatasetManager]:[delete_history_task] err:{:?}",e);
+
+                                   let resp = UiResponse{status_code: -1, status_msg: e.to_string(),payload_json:"".to_string()};
+                                   if resp_sender.send(resp).is_err(){
+                                        //Do not need process next step, here is Err-Topest-Process Layer!
+                                        error!("[DatasetManager]:[delete_history_task] can not handle this err, just log!!! ui {} cmd resp channel err", cmd);
+                                   }
                                 }
                             }
                         },

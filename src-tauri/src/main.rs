@@ -114,6 +114,26 @@ async fn get_history(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,St
     Ok(resp_json)
 }
 
+
+#[tauri::command]
+async fn delete_history_task(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,String,oneshot::Sender<UiResponse>)>>,req:String) -> Result<String,UiError> {
+    warn!("[ui::cmd get_history] req: {:?}", req);
+    
+    let cmd_sender = dataset_cmd_sender.inner().clone();
+
+    let (sx,rx) = oneshot::channel();
+
+    cmd_sender.send(("delete_history_task".to_string(),req,sx)).await?;
+
+    let resp = rx.await?;
+
+    let resp_json = serde_json::to_string(&resp)?;
+
+    warn!("[ui::cmd delete_history_task] resp: {:?}", resp_json);
+
+    Ok(resp_json)
+}
+
 #[tokio::main]
 async fn main() {
     let (ex_cmd_sender,ex_cmd_collector) = mpsc::channel(100);
@@ -139,7 +159,7 @@ async fn main() {
         )
         .manage(ex_cmd_sender)
         .invoke_handler(tauri::generate_handler![start_upload,stop_upload,terminate_upload,
-                                                 get_history])
+                                                 get_history,delete_history_task])
         .setup(|app| {
 
             let app_cache_dir_path_buf = app.path_resolver().app_cache_dir().expect("[APP]: can not get app_cache_dir");

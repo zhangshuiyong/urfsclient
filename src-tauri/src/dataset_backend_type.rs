@@ -54,3 +54,10 @@ pub struct UiTerminateUploadDatasetRequest{
     pub dataset_id: String,
     pub dataset_version_id: String,
 }
+
+
+#[derive(Clone,Serialize, Deserialize,Debug)]
+pub struct UiDeleteDatasetTaskRequest{
+    pub dataset_id: String,
+    pub dataset_version_id: String,
+}

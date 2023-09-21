@@ -47,7 +47,7 @@ async function stop_upload() {
     try{
       var resp = await invoke("stop_upload", { req :JSON.stringify({
             dataset_id: 'xxx',
-            dataset_version_id: 'default',
+            dataset_version_id: 'chat',
         })})
         message.success("暂停上传请求已发送");
 
@@ -63,7 +63,7 @@ async function terminate_upload() {
     try{
        var resp = await invoke("terminate_upload", { req :JSON.stringify({
             dataset_id: 'xxx',
-            dataset_version_id: 'default',
+            dataset_version_id: 'chat',
           })})
         message.success("终止上传已发送");
 
@@ -80,10 +80,26 @@ async function get_history() {
         info("[ui] click get_history btn")
         let history = await invoke("get_history", {req: JSON.stringify({ req: "{}" })})
         message.success("获取文件上传历史成功");
-        info("[ui] get_history result:"+history);
+        info("[ui] get_history return history tasklist:"+history);
     }catch(err: any){
         message.error("获取文件上传历史错误：", err);
         error(`获取文件上传历史出错: ${err}`);
+    }
+}
+
+async function delete_history_task() {
+    try{
+       var resp = await invoke("delete_history_task", { req :JSON.stringify({
+            dataset_id: 'xxx',
+            dataset_version_id: 'chat',
+          })})
+        message.success("删除任务记录请求已发送");
+
+        info(`删除任务记录请求返回: ${resp}`);
+
+    }catch(err: any){
+        message.error("终止上传出错：", err);
+        error(`终止上传出错: ${err}`);
     }
 }
 
@@ -91,7 +107,14 @@ async function get_history() {
 
 <template>
   <div class="card">
-    <button type="button" @click="select_upload_fold()">上传数据集</button>
+    <button type="button" @click="select_upload_fold()">上传数据集任务</button>
+
+    <button type="button" @click="stop_upload()">暂停数据集任务</button>
+
+    <button type="button" @click="terminate_upload()">删除正在上传任务</button>
+
+    <button type="button" @click="delete_history_task()">删除非上传任务</button>
+
     <button type="button" @click="get_history()">历史任务</button>
   </div>
 
