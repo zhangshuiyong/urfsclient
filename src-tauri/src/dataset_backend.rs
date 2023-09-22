@@ -547,7 +547,8 @@ fn get_history_task_list_from_db(pre_len: usize) -> Result<String> {
                 
                 let dataset_status_json_str =  serde_json::to_string(&task.dataset_status)?;
 
-                if dataset_status_json_str.contains("Uploading") {
+                if dataset_status_json_str.contains("Wait") || dataset_status_json_str.contains("Init") 
+                   || dataset_status_json_str.contains("ReadUpload") || dataset_status_json_str.contains("Uploading")  {
                     task.dataset_status = DataSetStatus::Stop;
                 }
             }
