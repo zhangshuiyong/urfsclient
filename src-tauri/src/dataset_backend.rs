@@ -456,7 +456,7 @@ fn update_history_task_to_db(dataset_id:&str,dataset_version_id:&str,local_datas
 
         let old_task_json = String::from_utf8(old_task_json_bytes.to_vec())?;
 
-        info!("[update_history_task] old task:{},key:{}",old_task_json,task_key);
+        info!("[update_history_task_to_db] old task:{},key:{}",old_task_json,task_key);
 
         let mut old_task = serde_json::from_str::<DatasetHistoryTask>(&old_task_json)?;
 
@@ -465,12 +465,12 @@ fn update_history_task_to_db(dataset_id:&str,dataset_version_id:&str,local_datas
 
         let new_task_json = serde_json::to_string(&old_task)?;
 
-        info!("[update_history_task] new task:{},key:{}",new_task_json,task_key);
+        info!("[update_history_task_to_db] new task:{},key:{}",new_task_json,task_key);
 
         dataset_history_task_db.insert(task_key.as_bytes(),new_task_json.as_bytes())?;
 
     }else{
-        return Err(anyhow!("[update_history_task] Can not get history task of key {:?}",task_key));
+        return Err(anyhow!("[update_history_task_to_db] Can not get history task of key {:?}",task_key));
     }
 
     Ok(())
@@ -624,17 +624,21 @@ async fn start_upload(all_dataset_sema: Arc<Semaphore>, dataset_status_sender: m
     let mut result;
                                             
     let mut dataset_status;
-
+    
     let _try_create_dataset_image_task_permited_by_all_dataset = all_dataset_sema.acquire().await?;
+
+    warn!("[start_upload] take dataset_sema and continue !");
 
     dataset_status = DataSetStatus::Init;
     dataset_status_sender.send((req.dataset_id.clone(),req.dataset_version_id.clone(),dataset_status)).await?;
 
+    info!("[{:?}][start_upload][create_dataset_image] start !",std::thread::current().id());
+
     result = create_dataset_image(req.clone()).await;
 
+    info!("[start_upload][create_dataset_image] end !");
+
     if result.is_ok() {
-        // dataset_status = DataSetStatus::ReadyUpload;
-        // dataset_status_sender.send((req.dataset_id.clone(),req.dataset_version_id.clone(),dataset_status)).await?;
         
         result = start_dataset_uploader(all_dataset_sema.clone(), dataset_status_sender.clone(),uploader_shutdown_cmd_suber,uploader_shutdown_cmd_rx,req.clone()).await;
         
@@ -726,8 +730,7 @@ impl DatasetManager {
             tokio::select! {
                 //allow dataset_status_sender free!
                 Some((dataset_id,dataset_version_id,dataset_status)) = self.dataset_status_collector.recv() => {
-                    debug!("[DatasetManager]: received dataset_status: {:?}. dataset_id:{},dataset_version_id:{}",
-                    dataset_status,dataset_id,dataset_version_id);
+                    debug!("[DatasetManager]: received dataset_status: {:?}. dataset_id:{},dataset_version_id:{}",dataset_status,dataset_id,dataset_version_id);
         
                    let update_hist_task_result = update_history_task_status_to_db(dataset_id.as_str(),dataset_version_id.as_str(), dataset_status.clone());
 
@@ -742,7 +745,7 @@ impl DatasetManager {
                     match cmd.as_str() {
                         "start_upload" => {
 
-                            debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
+                            debug!("[{:?}][DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",std::thread::current().id(),cmd,req_json);
                             
                             let req_json_result =  serde_json::from_str::<UiStartUploadDatasetRequest>(&req_json);
 
@@ -761,15 +764,32 @@ impl DatasetManager {
                                         error!("[DatasetManager]:[start_upload] new_history_task_to_db failed, dataset_id:{},dataset_version_id:{},err:{:?}",
                                         req.dataset_id,req.dataset_version_id,new_hist_task_result);
                                     }else{
+
                                         let dataset_status_sender = self.dataset_status_sender.clone();
                                         let all_dataset_sema = self.all_dataset_sema.clone();
+                                        
+                                        //Concurent upload tasks futures chain
+                                        warn!("[DatasetManager]:[start_upload] new tokio runtime for finish tokio::select! upload tasks future chain");
+                                        std::thread::spawn(move || {
+                                            let rt_result = tokio::runtime::Runtime::new();
+                                            match rt_result {
+                                                std::result::Result::Ok(rt) => {
+                                                    rt.block_on(async move {
 
-                                        //Concurent upload futures tree
-                                        tokio::spawn(async move {
-                                            //cause handling error nums >2 is trouble in one fn scope, we should define a new fn like start_upload fn
-                                            let result = start_upload(all_dataset_sema, dataset_status_sender,uploader_shutdown_cmd_suber,uploader_shutdown_cmd_rx,req.clone()).await;
+                                                        let result = start_upload(all_dataset_sema, dataset_status_sender,uploader_shutdown_cmd_suber,uploader_shutdown_cmd_rx,req.clone()).await;
+                                                        match result {
+                                                            std::result::Result::Ok(_) => {
+                                                                debug!("[DatasetManager]:[start_upload] finish. result: {:?},",result);
+                                                            },std::result::Result::Err(e)=> {
+                                                                error!("[DatasetManager]:[start_upload] occur err:{:?}",e);
+                                                            }
+                                                        }
 
-                                            debug!("[DatasetManager]:[start_upload] req:{:?}, result: {:?},",req,result);
+                                                    });
+                                                },std::result::Result::Err(e)=> {
+                                                    error!("[DatasetManager]:[start_upload] in new tokio runtime err:{:?}",e);
+                                                }
+                                            }
                                         });
 
                                         let resp = UiResponse{status_code: 0, status_msg:"".to_string(),payload_json:"".to_string()};
@@ -794,6 +814,7 @@ impl DatasetManager {
                                     }
                                 }
                             }
+
                         },
                         "stop_upload" => {
                             debug!("[DatasetManager]: ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
@@ -897,7 +918,7 @@ impl DatasetManager {
 
                         },
                         "get_history" => {
-                            debug!("[DatasetManager]:[get_history] ui_cmd_collector received cmd: {}, request: {:?}",cmd,req_json);
+                            debug!("[{:?}][DatasetManager]:[get_history] ui_cmd_collector received cmd: {}, request: {:?}",std::thread::current().id(),cmd,req_json);
 
                             let history_task_list_json_result = get_history_task_list_from_db(HISTORY_TASK_LIST_MAX_LENGTH);
 
