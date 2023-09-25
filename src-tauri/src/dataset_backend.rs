@@ -511,6 +511,37 @@ fn update_history_task_status_to_db(dataset_id:&str,dataset_version_id:&str,ds: 
 }
 
 
+fn update_history_task_status_with_db(dataset_history_task_db:&sled::Db,dataset_id:&str,dataset_version_id:&str,ds: DataSetStatus) -> Result<()> {
+
+    let task_key = format!("{}:{}:{}",HISTORY_TASK_KEY_PREFIX,dataset_id,dataset_version_id);
+
+    let old_task_json_op = dataset_history_task_db.get(task_key.as_bytes())?;
+
+    if let Some(old_task_json_bytes) = old_task_json_op {
+
+        let old_task_json = String::from_utf8(old_task_json_bytes.to_vec())?;
+
+        info!("[update_history_task_status_with_db] old task:{},key:{}",old_task_json,task_key);
+
+        let mut task = serde_json::from_str::<DatasetHistoryTask>(&old_task_json)?;
+
+        task.dataset_status = ds;
+
+        let new_task_json = serde_json::to_string(&task)?;
+
+        info!("[update_history_task_status_with_db] new task:{},key:{}",new_task_json,task_key);
+
+        dataset_history_task_db.insert(task_key.as_bytes(),new_task_json.as_bytes())?;
+
+    }else{
+        return Err(anyhow!("[update_history_task_status_with_db] Can not get task of key {:?}",task_key));
+    }
+
+    Ok(())
+
+}
+
+
 fn delete_history_task_to_db(dataset_id:&str,dataset_version_id:&str) -> Result<()> {
     let history_task_db_path = get_history_task_db_path()?;
 
@@ -540,15 +571,21 @@ fn get_history_task_list_from_db(pre_len: usize) -> Result<String> {
             let task_json = String::from_utf8(kv.1.to_vec())?;
 
             let mut task =  serde_json::from_str::<DatasetHistoryTask>(&task_json)?;
-            
+
             if std::env::var("URFS_IS_FIRST_REQUEST").is_err(){
-                //First request history_task_list will set Uploading DatasetStatus to Stop
-                std::env::set_var("URFS_IS_FIRST_REQUEST","false");
-                
+
                 let dataset_status_json_str =  serde_json::to_string(&task.dataset_status)?;
 
-                if dataset_status_json_str.contains("Wait") || dataset_status_json_str.contains("Init") 
+                debug!("First request history task list, dataset status need to change:{:?}",dataset_status_json_str);
+
+                if dataset_status_json_str.contains("Wait") || dataset_status_json_str.contains("Init")
                    || dataset_status_json_str.contains("ReadUpload") || dataset_status_json_str.contains("Uploading")  {
+
+                    let result = update_history_task_status_with_db(&dataset_history_task_db,task.dataset_id.as_str(),task.dataset_version_id.as_str(),DataSetStatus::Stop);
+                    if result.is_err() {
+                        return Err(anyhow!("[get_history_task_list_from_db][update_history_task_status_with_db] err {:?},task:{:?}",result,task));
+                    }
+
                     task.dataset_status = DataSetStatus::Stop;
                 }
             }
@@ -558,6 +595,12 @@ fn get_history_task_list_from_db(pre_len: usize) -> Result<String> {
         }else{
             break;
         }
+    }
+
+    //First request history_task_list will set Uploading DatasetStatus to Stop
+    //After that change the state
+    if std::env::var("URFS_IS_FIRST_REQUEST").is_err() {
+        std::env::set_var("URFS_IS_FIRST_REQUEST", "false");
     }
 
     history_tasks.sort_by(|a, b| b.create_timestamp.cmp(&a.create_timestamp));
