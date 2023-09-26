@@ -638,7 +638,6 @@ async fn start_dataset_uploader(all_dataset_chunk_sema: Arc<Semaphore>, dataset_
         return Err(anyhow!("[start_dataset_uploader]: dataset upload empty content is not allowed!!! dataset_id:{:?},dataset_version_id:{:?}",req.dataset_id,req.dataset_version_id));
     }
 
-    //ToDo: will panic if dataset file size is zero !!!
     let dataset_meta = &dataset_metas[0];
 
     let upload_dataset_meta = dataset_meta.clone();
