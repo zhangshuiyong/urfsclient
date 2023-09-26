@@ -1,148 +1,85 @@
 <script setup lang="ts">
-import { h,ref,reactive } from "vue";
+import { h, ref, reactive } from "vue";
 import { invoke } from "@tauri-apps/api/tauri";
-import { open } from '@tauri-apps/api/dialog';
-import { info,error } from "tauri-plugin-log-api";
-import { message } from 'ant-design-vue';
-import { FileOutlined,FolderOutlined } from '@ant-design/icons-vue';
-
-const uploadItemList:any = reactive([]);
-
+import { open } from "@tauri-apps/api/dialog";
+import { info, error } from "tauri-plugin-log-api";
+import { message } from "ant-design-vue";
+import { appCacheDir } from "@tauri-apps/api/path";
+import { FileOutlined, FolderOutlined } from "@ant-design/icons-vue";
+import { useStore } from "vuex";
+import config from "../util/config"
+import { defineEmits } from 'vue'
+const emit = defineEmits(['close'])
+const store = useStore();
+const uploadItemList: any = reactive([]);
 async function select_upload_fold() {
+  const selected_folder = await open({
+    multiple: false,
+    directory: true,
+  });
+  if (typeof selected_folder === "string") {
+    // info("[ui] select upload folder :" + selected_folder);
+    uploadItemList[0] = { name: selected_folder, isDir: true }
+  }
+}
+async function star_upload(source: string) {
 
-    const selected_folder = await open({
-        multiple: false,
-        directory: true,
+  // info(`[ui] star_upload source path:${source}`);
+
+  try {
+    var resp: any = await invoke("start_upload", {
+      req: JSON.stringify({
+        dataset_id: store.state.dataSetId,
+        dataset_version_id: source.substring(source.lastIndexOf('/') + 1),
+        dataset_source: source,
+        server_endpoint: config.baseURL
+      })
     });
-
-    if(typeof selected_folder === 'string'){
-        info("[ui] select upload folder :"+selected_folder);
-        uploadItemList.push({name:selected_folder,isDir:true});
+    let Data = JSON.parse(resp)
+    if (Data.status_code == 0) {
+      emit('close')
+      message.success('上传请求已发送');
     }
-}
-
-async function star_upload(source:string) {
-
-    info(`[ui] star_upload source path:${source}`);
-
-    try{
-       var resp = await invoke("start_upload", { req :JSON.stringify({
-            dataset_id: 'xxx',
-            dataset_version_id: source.substring(source.lastIndexOf('/')+1),
-            dataset_source: source,
-            server_endpoint: 'http://0.0.0.0:65004'
-        })});
-
-        message.success('上传请求已发送');
-
-        info(`上传请求返回: ${resp}`);
-
-    }catch(err: any){
-        message.error('上传出错：',err);
-        error(`上传出错: ${err}`);
+    else {
+      message.error('上传出错');
     }
+
+    // info(`上传请求返回: ${resp}`);
+
+  } catch (err: any) {
+    message.error('上传出错：', err);
+    error(`上传出错: ${err}`);
+  }
 }
-
-async function stop_upload() {
-    try{
-      var resp = await invoke("stop_upload", { req :JSON.stringify({
-            dataset_id: 'xxx',
-            dataset_version_id: 'chat',
-        })})
-        message.success("暂停上传请求已发送");
-
-        info(`暂停上传请求返回: ${resp}`);
-
-    }catch(err: any){
-        message.error("暂停上传出错：", err);
-        error(`暂停上传出错: ${err}`);
-    }
-}
-
-async function terminate_upload() {
-    try{
-       var resp = await invoke("terminate_upload", { req :JSON.stringify({
-            dataset_id: 'xxx',
-            dataset_version_id: 'chat',
-          })})
-        message.success("终止上传已发送");
-
-        info(`终止上传请求返回: ${resp}`);
-
-    }catch(err: any){
-        message.error("终止上传出错：", err);
-        error(`终止上传出错: ${err}`);
-    }
-}
-
-async function get_history() {
-    try{
-        info("[ui] click get_history btn")
-        let history = await invoke("get_history", {req: JSON.stringify({ req: "{}" })})
-        message.success("获取文件上传历史成功");
-        info("[ui] get_history return history tasklist:"+history);
-    }catch(err: any){
-        message.error("获取文件上传历史错误：", err);
-        error(`获取文件上传历史出错: ${err}`);
-    }
-}
-
-async function delete_history_task() {
-    try{
-       var resp = await invoke("delete_history_task", { req :JSON.stringify({
-            dataset_id: 'xxx',
-            dataset_version_id: 'chat',
-          })})
-        message.success("删除任务记录请求已发送");
-
-        info(`删除任务记录请求返回: ${resp}`);
-
-    }catch(err: any){
-        message.error("终止上传出错：", err);
-        error(`终止上传出错: ${err}`);
-    }
-}
-
 </script>
 
 <template>
   <div class="card">
-    <button type="button" @click="select_upload_fold()">上传数据集任务</button>
-
-    <button type="button" @click="stop_upload()">暂停数据集任务</button>
-
-    <button type="button" @click="terminate_upload()">删除正在上传任务</button>
-
-    <button type="button" @click="delete_history_task()">删除非上传任务</button>
-
-    <button type="button" @click="get_history()">历史任务</button>
+    <a-button type="primary" @click="select_upload_fold()">上传数据集</a-button>
   </div>
 
-  <a-list
-    class="demo-upload-list"
-    item-layout="horizontal"
-    :data-source="uploadItemList"
-  >
-    
+  <a-list class="demo-upload-list" item-layout="horizontal" :data-source="uploadItemList">
     <template #renderItem="{ item }">
       <a-list-item>
         <template #actions>
           <a key="star_upload" @click="star_upload(item.name)">开始上传</a>
-          <a key="stop_upload" @click="stop_upload()">暂停上传</a>
-          <a key="terminate_upload" @click="terminate_upload()">终止上传</a>
         </template>
-       <div>
+        <div>
           <a-list-item-meta description="">
             <template #title>
               <span>{{ item.name }}</span>
             </template>
             <template #avatar>
-                <a-avatar size="small" v-if="item.isDir===false">
-                    <template #icon><FileOutlined /></template>
-                </a-avatar>
-                <a-avatar size="small" v-if="item.isDir===true">
-                    <template #icon><FolderOutlined /></template>
-                </a-avatar>
+              <a-avatar size="small" v-if="item.isDir === false">
+                <template #icon>
+                  <FileOutlined />
+                </template>
+              </a-avatar>
+              <a-avatar size="small" v-if="item.isDir === true">
+                <template #icon>
+                  <FolderOutlined />
+                </template>
+              </a-avatar>
             </template>
           </a-list-item-meta>
         </div>
@@ -150,3 +87,20 @@ async function delete_history_task() {
     </template>
   </a-list>
 </template>
+<style scoped>
+.card {
+  margin-top: 40px;
+  text-align: center;
+}
+
+:deep(.ant-list-item-meta-content) {
+  width: 200px !important;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:deep(.ant-list-item-action) {
+  margin-left: 0px !important
+}
+</style>

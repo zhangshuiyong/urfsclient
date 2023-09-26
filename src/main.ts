@@ -1,5 +1,5 @@
 import { createApp } from "vue";
-
+import moment from 'moment'
 import Antd from 'ant-design-vue';
 import 'ant-design-vue/dist/reset.css';
 
@@ -14,3 +14,4 @@ attachConsole();
 const app = createApp(App);
 
 app.use(Antd).use(router).use(globalShareStateStore).mount("#app");
+app.config.globalProperties.$moment = moment

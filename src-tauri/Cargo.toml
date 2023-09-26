@@ -13,7 +13,7 @@ edition = "2021"
 tauri-build = { version = "1.3", features = [] }
 
 [dependencies]
-tauri = { version = "1.3", features = [ "path-all", "fs-remove-dir", "fs-write-file", "fs-create-dir", "fs-exists", "fs-remove-file", "fs-read-file", "fs-read-dir", "dialog-all", "shell-open"] }
+tauri = { version = "1.3", features = [ "http-all", "path-all", "fs-remove-dir", "fs-write-file", "fs-create-dir", "fs-exists", "fs-remove-file", "fs-read-file", "fs-read-dir", "dialog-all", "shell-open"] }
 tauri-plugin-log = { git = "https://github.com/tauri-apps/plugins-workspace", branch = "dev",features = ["colored"] }
 thiserror = "1.0"
 fern="0.6"

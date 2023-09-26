@@ -109,7 +109,7 @@ async fn get_history(dataset_cmd_sender: tauri::State<'_,mpsc::Sender<(String,St
 
     let resp_json = serde_json::to_string(&resp)?;
 
-    warn!("[ui::cmd get_history] resp: {:?}", resp_json);
+    //warn!("[ui::cmd get_history] resp: {:?}", resp_json);
 
     Ok(resp_json)
 }
