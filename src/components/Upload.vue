@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { h, ref, reactive } from "vue";
+import { ref, reactive, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/tauri";
 import { open } from "@tauri-apps/api/dialog";
-import { info, error } from "tauri-plugin-log-api";
+import { error } from "tauri-plugin-log-api";
 import { message } from "ant-design-vue";
-import { appCacheDir } from "@tauri-apps/api/path";
 import { FileOutlined, FolderOutlined } from "@ant-design/icons-vue";
 import { useStore } from "vuex";
 import config from "../util/config"
@@ -12,6 +11,11 @@ import { defineEmits } from 'vue'
 const emit = defineEmits(['close'])
 const store = useStore();
 const uploadItemList: any = reactive([]);
+const allow = ref<boolean>(true);
+const version = ref<string>("");
+onMounted(() => {
+  version.value = store.state.dataSetVersion
+});
 async function select_upload_fold() {
   const selected_folder = await open({
     multiple: false,
@@ -25,31 +29,34 @@ async function select_upload_fold() {
 async function star_upload(source: string) {
 
   // info(`[ui] star_upload source path:${source}`);
+  if (allow.value === true) {
+    try {
+      allow.value = false;
+      var resp: any = await invoke("start_upload", {
+        req: JSON.stringify({
+          dataset_id: store.state.dataSetId,
+          dataset_version_id: version.value,
+          dataset_source: source,
+          server_endpoint: config.baseURL
+        })
+      });
+      let Data = JSON.parse(resp)
+      if (Data.status_code == 0) {
+        emit('close')
+        message.success('上传请求已发送');
+      }
+      else {
+        message.error('上传出错');
+      }
+      allow.value = true
+      // info(`上传请求返回: ${resp}`);
 
-  try {
-    var resp: any = await invoke("start_upload", {
-      req: JSON.stringify({
-        dataset_id: store.state.dataSetId,
-        dataset_version_id: source.substring(source.lastIndexOf('/') + 1),
-        dataset_source: source,
-        server_endpoint: config.baseURL
-      })
-    });
-    let Data = JSON.parse(resp)
-    if (Data.status_code == 0) {
-      emit('close')
-      message.success('上传请求已发送');
+    } catch (err: any) {
+      message.error('上传出错：', err);
+      error(`上传出错: ${err}`);
+      allow.value = true
     }
-    else {
-      message.error('上传出错');
-    }
-
-    // info(`上传请求返回: ${resp}`);
-
-  } catch (err: any) {
-    message.error('上传出错：', err);
-    error(`上传出错: ${err}`);
-  }
+  } else { message.warning("请求发送中") }
 }
 </script>
 
